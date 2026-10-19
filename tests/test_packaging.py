@@ -268,3 +268,41 @@ def test_everything_the_dashboard_imports_is_in_its_image():
 
     assert third_party, "the scan should have found the dashboard's imports"
     assert not missing, f"imported by the dashboard but not in its image: {missing}"
+
+
+# ------------------------------------------------------------ the release workflow
+
+RELEASE = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+
+
+def _release_images():
+    return re.findall(r"- name: (\w+)\n\s+dockerfile: (\S+)\n\s+target: (\w+)", RELEASE)
+
+
+def test_the_release_builds_the_api_and_the_dashboard():
+    assert {name for name, _, _ in _release_images()} == {"api", "dashboard"}
+
+
+def test_each_release_image_points_at_a_real_dockerfile_and_stage():
+    for name, dockerfile, target in _release_images():
+        path = ROOT / dockerfile
+        assert path.exists(), f"{name}: {dockerfile} does not exist"
+        stages = re.findall(r"^FROM .* AS (\w+)$", path.read_text(encoding="utf-8"), flags=re.M)
+        assert target in stages, f"{name}: {dockerfile} has no stage {target!r} (has {stages})"
+
+
+def test_the_release_publishes_only_on_a_version_tag_or_when_asked():
+    assert re.search(r'tags: \["v\*"\]', RELEASE)
+    assert "branches:" not in RELEASE  # a push to a branch must never publish
+    assert "startsWith(github.ref, 'refs/tags/v') || inputs.publish" in RELEASE
+
+
+def test_the_image_is_checked_before_it_is_published():
+    assert RELEASE.index("Check the image") < RELEASE.index("- name: Publish")
+
+
+def test_only_the_release_workflow_may_write_packages():
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "packages: write" in RELEASE
+    assert "packages" not in ci  # CI runs on pull requests and needs read access only
