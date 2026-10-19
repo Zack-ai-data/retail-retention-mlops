@@ -72,6 +72,20 @@ Keep tests deterministic: seed randomness, no network, no reliance on test order
 - **Never commit** `.env`, anything under `docs/review/` (private working material), or caches. `git status` before every commit.
 - **History is not rewritten** on `main`. If a mistake gets in, fix it forward with a new change.
 
+## Releasing
+
+Releases publish the API and dashboard images to the GitHub Container Registry (`.github/workflows/deploy.yml`). They are published by tagging a commit that is already on `main` and green:
+
+```
+git switch main && git pull
+git tag -a v0.1.0 -m "What this release contains"
+git push origin v0.1.0
+```
+
+The workflow builds both images, starts each one to check it runs (and does not run as root), and then publishes them as `ghcr.io/<owner>/<repo>-api` and `-dashboard`, tagged `0.1.0`, `0.1`, `sha-<commit>` and `latest`. The commit is built into the API image, so training runs from it record which code made them. To try the build without publishing, run the workflow by hand from the Actions tab and leave "Publish the images" unticked. Do not delete or move a published tag: publish a new version instead.
+
+After the first publish, open the package on GitHub (your profile > Packages) and check its visibility. Running the published images somewhere is a later step.
+
 ## Adding a service
 
 Put its container setup in `services/<name>/` (Dockerfile and config), add it to `docker-compose.yml` with a healthcheck and a port bound to `127.0.0.1`, pin versions that must match between server and client, and document it in the README.
