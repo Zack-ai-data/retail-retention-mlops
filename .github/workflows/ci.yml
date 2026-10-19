@@ -1,0 +1,96 @@
+# Continuous integration: the same checks as `docker compose run --rm quality`, on every push
+# and pull request, so "nothing the tests pin has changed" is checked by a machine, not promised.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # A throwaway PostgreSQL for the database tests. The credentials exist only inside this job
+    # and protect nothing; no real secret is used anywhere in this workflow.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci_admin
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: retail_dw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_admin -d retail_dw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ci_admin
+      POSTGRES_PASSWORD: ci_password
+      POSTGRES_DB: retail_dw
+      OMP_NUM_THREADS: "4"
+      MPLBACKEND: Agg
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      # The exact, hash-checked versions the Docker images use, so CI and the local quality gate
+      # run the same libraries (a test checks the installed versions match the lock file).
+      - name: Install
+        run: pip install --require-hashes -r requirements-dev.lock
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Type check (strict)
+        run: mypy
+
+      # The tests marked `warehouse` need the real 1M-row dataset loaded into Postgres, which takes
+      # minutes, so they stay a local check (the file itself is in the repository, so a separate
+      # slower job could run them). Everything else runs, including the end-to-end pipeline tests
+      # on a synthetic workbook. The 90% branch-coverage minimum from pyproject.toml is enforced.
+      - name: Tests with coverage
+        run: python -m pytest --cov -m "not warehouse"
+
+  # The dashboard has its own dependencies (Streamlit), so its tests run from its own lock file.
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/dashboard/requirements-test.lock
+
+      - name: Install
+        run: pip install --require-hashes -r services/dashboard/requirements-test.lock
+
+      - name: Dashboard tests
+        run: python -m pytest tests/test_dashboard_client.py tests/test_dashboard_ui.py -q --noconftest

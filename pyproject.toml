@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retail-retention-mlops"
+version = "0.1.0"
+description = "End to end MLE & MLOps project on the UCI Online Retail II dataset"
+readme = "README.md"
+requires-python = ">=3.11"
+# Direct dependencies only. The exact versions every image installs are in requirements.lock
+# (runtime) and requirements-dev.lock (runtime + dev tools); see CONTRIBUTING.md to regenerate.
+# The Streamlit app has its own dependencies (services/dashboard/), so the API image stays small.
+dependencies = [
+    "fastapi",
+    "pydantic",
+    "uvicorn",
+    "pandas",
+    "numpy",
+    "scipy",
+    "openpyxl",
+    "psycopg[binary]",
+    "matplotlib",
+    "scikit-learn",
+    "requests",
+    "mlflow-skinny==3.17.1",  # keep in sync with services/mlflow/Dockerfile
+]
+
+[project.optional-dependencies]
+# sqlalchemy + alembic: lets tests use a throwaway SQLite MLflow store (the server uses Postgres)
+dev = ["pytest", "pytest-cov", "ruff", "mypy", "sqlalchemy", "alembic", "cloudpickle", "httpx"]
+
+[tool.setuptools]
+packages = ["src"]
+
+# ---------------------------------------------------------------- tests
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "e2e: runs the whole pipeline (load, transform, train) on a small synthetic workbook; slower",
+    "warehouse: checks the real loaded warehouse; skipped when it is empty or unreachable",
+]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90  # applies whenever tests run with --cov
+show_missing = true
+skip_covered = true
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:"]
+
+# ------------------------------------------------------- lint and format
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["data"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes (unused imports, undefined names)
+    "I",        # import order
+    "B",        # likely bugs (flake8-bugbear)
+    "UP",       # modern syntax for the target Python version
+    "C4",       # simpler comprehensions
+    "SIM",      # simplifiable code
+    "RUF",      # ruff-specific checks
+]
+ignore = [
+    "RUF001", "RUF002", "RUF003",  # typographic characters in text are intentional
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# the review scripts import a sibling module and are not part of the package
+"docs/review/scripts/*" = ["E402", "I001", "E501", "B905", "C408"]
+
+# ---------------------------------------------------------------- types
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+ignore_missing_imports = true   # scikit-learn, pandas, mlflow etc. ship no type information
+strict = true

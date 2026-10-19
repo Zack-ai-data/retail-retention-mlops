@@ -1,0 +1,15 @@
+# Github Actions CICD automated pipeline
+#
+# Placeholder for deployment. There is nothing to deploy yet (the project runs locally with Docker
+# Compose), so this workflow only runs when started by hand and does nothing. The checks that run
+# on every push live in ci.yml.
+name: Deploy (placeholder)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Nothing to deploy yet. See ci.yml for the automated checks."

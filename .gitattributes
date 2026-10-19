@@ -1,0 +1,8 @@
+# Line endings are LF in the repository and in every working copy, whatever the machine.
+# The project runs in Linux containers, where CRLF breaks shell scripts, Dockerfiles and entrypoints.
+* text=auto eol=lf
+
+# Never touch binary files
+*.xlsx binary
+*.png binary
+*.pkl binary

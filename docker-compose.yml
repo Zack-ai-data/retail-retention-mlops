@@ -1,0 +1,171 @@
+name: retail-retention-mlops
+
+# Settings shared by the `app` and `quality` services
+x-app-base: &app-base
+  profiles: ["app"]
+  depends_on:
+    postgres:
+      condition: service_healthy
+    mlflow:
+      condition: service_healthy
+  environment:
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    POSTGRES_DB: ${POSTGRES_DB}
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    DATA_PATH: /data/online_retail_II.xlsx
+    # scikit-learn's boosting would otherwise use every CPU core, which is slower (and
+    # occasionally stalls) on small datasets like this one
+    OMP_NUM_THREADS: ${OMP_NUM_THREADS:-4}
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: retail-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      # Bound to localhost only; DBeaver connects to localhost:${POSTGRES_PORT}
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Experiment tracking and model registry. UI: http://localhost:5000
+  # Metadata lives in the `mlflow` database on the postgres service; artifacts in a volume.
+  mlflow:
+    build:
+      context: .
+      dockerfile: services/mlflow/Dockerfile
+    image: retail-mlflow:dev
+    container_name: retail-mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      MLFLOW_DB: mlflow
+    ports:
+      - "127.0.0.1:${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - mlartifacts:/mlartifacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # Pipeline runner. Not started by a plain `docker compose up`;
+  # run it with: docker compose run --rm app
+  app:
+    <<: *app-base
+    build:
+      context: .
+      target: runtime
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    image: retail-app:dev
+    volumes:
+      - ./data:/data:ro
+
+  # HTTP API (FastAPI). Start it with: docker compose up -d api   Docs: http://localhost:8000/docs
+  # Bound to localhost only: there is no authentication. It needs the models in the registry
+  # (train first) and, for stored scores and outreach plans, the score and plan stages.
+  api:
+    <<: *app-base
+    build:
+      context: .
+      target: runtime
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    image: retail-app:dev
+    container_name: retail-api
+    command: ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    healthcheck:
+      # /health answers 503 when the models are not loaded or the database is down
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+
+  # Dashboard (Streamlit). Start it with: docker compose up -d dashboard   http://localhost:8501
+  # It only talks to the API, so it has none of the training stack. Localhost only.
+  dashboard:
+    build:
+      context: .
+      dockerfile: services/dashboard/Dockerfile
+      target: runtime
+    image: retail-dashboard:dev
+    container_name: retail-dashboard
+    profiles: ["app"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      API_URL: http://api:8000
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-8501}:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # The dashboard's own tests (they need Streamlit, which the quality image does not have, and
+  # run without tests/conftest.py, which needs the database driver the dashboard does not have).
+  # Run with: docker compose run --rm dashboard-tests
+  dashboard-tests:
+    build:
+      context: .
+      dockerfile: services/dashboard/Dockerfile
+      target: test
+    image: retail-dashboard-test:dev
+    profiles: ["app"]
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "-m", "pytest", "tests/test_dashboard_client.py", "tests/test_dashboard_ui.py", "-q", "-p", "no:cacheprovider", "--noconftest"]
+
+  # Code quality gate: lint, format check, strict type check, then the tests with the coverage
+  # threshold from pyproject.toml. Exits non-zero if anything fails.
+  # Run it with: docker compose run --rm quality
+  # The project folder is mounted, so it checks your current files without a rebuild.
+  quality:
+    <<: *app-base
+    build:
+      context: .
+      target: dev
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    image: retail-app-quality:dev
+    volumes:
+      - .:/app
+    command:
+      - sh
+      - -c
+      - ruff check . && ruff format --check . && mypy && python -m pytest --cov -q
+
+volumes:
+  pgdata:
+  mlartifacts:
