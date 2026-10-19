@@ -83,7 +83,7 @@ def test_resamples_where_the_metric_is_undefined_are_skipped():
 
     gain = evaluation.paired_bootstrap(y, rng.normal(size=200), rng.normal(size=200), roc_auc_score)
 
-    assert 500 <= gain.resamples < evaluation.N_BOOTSTRAP
+    assert evaluation.N_BOOTSTRAP // 2 <= gain.resamples < evaluation.N_BOOTSTRAP
 
 
 def test_an_evaluation_set_where_the_metric_is_mostly_undefined_is_an_error():

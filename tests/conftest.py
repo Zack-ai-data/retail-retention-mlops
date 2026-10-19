@@ -1,3 +1,5 @@
+import dataclasses
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -6,11 +8,36 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src import config, database, tracking
+from src import config, database, evaluation, model_search, tracking
 from src.errors import PipelineError
 
 SHEET_1 = "Year 2009-2010"
 SHEET_2 = "Year 2010-2011"
+
+
+# Training tests check plumbing (is the decision logged, is the model registered), so by default
+# they train with one hyperparameter combination per algorithm and 100 bootstrap resamples. That is
+# about 5x faster than the real settings. FULL_TRAINING_TESTS=1 runs them with the real grids and
+# 1,000 resamples (CI does this on main), and tests marked `warehouse` always do, because they pin
+# the real results.
+FULL_TRAINING = os.getenv("FULL_TRAINING_TESTS") == "1"
+QUICK_BOOTSTRAP = 100
+
+
+def _one_combination(candidates):
+    return [
+        dataclasses.replace(c, grid={name: values[:1] for name, values in c.grid.items()})
+        for c in candidates
+    ]
+
+
+@pytest.fixture(autouse=True)
+def quick_training(request, monkeypatch):
+    if FULL_TRAINING or request.node.get_closest_marker("warehouse"):
+        return
+    monkeypatch.setattr(evaluation, "N_BOOTSTRAP", QUICK_BOOTSTRAP)
+    for name in ("CHURN_CANDIDATES", "VALUE_CANDIDATES", "SPEND_CANDIDATES"):
+        monkeypatch.setattr(model_search, name, _one_combination(getattr(model_search, name)))
 
 
 def pytest_addoption(parser):

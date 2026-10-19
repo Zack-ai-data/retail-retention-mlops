@@ -1,5 +1,17 @@
-# Continuous integration: the same checks as `docker compose run --rm quality`, on every push
-# and pull request, so "nothing the tests pin has changed" is checked by a machine, not promised.
+# Continuous integration: the same checks as `docker compose run --rm quality`.
+#
+#   quality        every push and pull request: lint, format, strict types and the fast tests.
+#                  Training tests use one hyperparameter combination and 100 bootstrap resamples
+#                  (tests/conftest.py), so it takes minutes, not the 23 it took with the real
+#                  settings. This and `dashboard` are the checks a pull request must pass.
+#   dashboard      the Streamlit dashboard's tests, from their own lock file.
+#   full-training  after a merge to main (and by hand): the same tests with the real
+#                  hyperparameter grids and 1,000 resamples (FULL_TRAINING_TESTS=1).
+#   regression     after a merge to main (and by hand): loads the real dataset and checks that
+#                  the pinned results still reproduce.
+#
+# The last two do not run on pull requests, so they cannot be required checks. A red run on main
+# means a change got through that the fast tests could not catch: fix it with a new pull request.
 name: CI
 
 on:
@@ -20,8 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # A throwaway PostgreSQL for the database tests. The credentials exist only inside this job
-    # and protect nothing; no real secret is used anywhere in this workflow.
+    # A throwaway PostgreSQL. The credentials exist only inside this job and protect nothing; no
+    # real secret is used anywhere in this workflow.
     services:
       postgres:
         image: postgres:16
@@ -69,12 +81,12 @@ jobs:
       - name: Type check (strict)
         run: mypy
 
-      # The tests marked `warehouse` need the real 1M-row dataset loaded into Postgres, which takes
-      # minutes, so they stay a local check (the file itself is in the repository, so a separate
-      # slower job could run them). Everything else runs, including the end-to-end pipeline tests
-      # on a synthetic workbook. The 90% branch-coverage minimum from pyproject.toml is enforced.
+      # The tests marked `warehouse` need the real dataset loaded into Postgres; the regression job
+      # runs them. Everything else runs, including the end-to-end pipeline tests on a synthetic
+      # workbook. The 90% branch-coverage minimum from pyproject.toml is enforced. The slowest
+      # tests are listed so a slowdown is visible.
       - name: Tests with coverage
-        run: python -m pytest --cov -m "not warehouse"
+        run: python -m pytest --cov -m "not warehouse" --durations=15
 
   # The dashboard has its own dependencies (Streamlit), so its tests run from its own lock file.
   dashboard:
@@ -94,3 +106,107 @@ jobs:
 
       - name: Dashboard tests
         run: python -m pytest tests/test_dashboard_client.py tests/test_dashboard_ui.py -q --noconftest
+
+  # The training tests again with the real hyperparameter grids and 1,000 bootstrap resamples.
+  full-training:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # A throwaway PostgreSQL. The credentials exist only inside this job and protect nothing; no
+    # real secret is used anywhere in this workflow.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci_admin
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: retail_dw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_admin -d retail_dw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ci_admin
+      POSTGRES_PASSWORD: ci_password
+      POSTGRES_DB: retail_dw
+      OMP_NUM_THREADS: "4"
+      MPLBACKEND: Agg
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      # The exact, hash-checked versions the Docker images use, so CI and the local quality gate
+      # run the same libraries (a test checks the installed versions match the lock file).
+      - name: Install
+        run: pip install --require-hashes -r requirements-dev.lock
+
+      - name: Tests with the real training settings
+        env:
+          FULL_TRAINING_TESTS: "1"
+        run: python -m pytest -m "not warehouse" --durations=15
+
+  # Loads the real 1M-row dataset (it is in the repository) and checks that the pinned results,
+  # row counts and model metrics still reproduce on it.
+  regression:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # A throwaway PostgreSQL. The credentials exist only inside this job and protect nothing; no
+    # real secret is used anywhere in this workflow.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci_admin
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: retail_dw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_admin -d retail_dw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ci_admin
+      POSTGRES_PASSWORD: ci_password
+      POSTGRES_DB: retail_dw
+      OMP_NUM_THREADS: "4"
+      MPLBACKEND: Agg
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      # The exact, hash-checked versions the Docker images use, so CI and the local quality gate
+      # run the same libraries (a test checks the installed versions match the lock file).
+      - name: Install
+        run: pip install --require-hashes -r requirements-dev.lock
+
+      - name: Load the dataset
+        run: python -m src.main --stage load
+
+      - name: Real-data regression tests
+        run: python -m pytest -m warehouse --require-warehouse -q
