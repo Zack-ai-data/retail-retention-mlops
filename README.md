@@ -47,6 +47,7 @@ sql/
 services/         one folder per supporting service's container setup
   mlflow/         MLflow server image and entrypoint (Airflow, Prometheus and Grafana will join it here)
   dashboard/      the Streamlit dashboard: app, its own image and its own pinned dependencies
+  airflow/        Airflow (Celery executor): image with the pipeline inside it, the DAGs, and the database-URL helper
 tests/            pytest suite: unit, database, end-to-end pipeline, error-path and real-warehouse
                   regression tests (database tests use a throwaway Postgres database,
                   model tests a throwaway SQLite MLflow store)
@@ -148,12 +149,19 @@ Serving and decisions (step 4):
  - **Dashboard** (`services/dashboard/`, Streamlit): who to contact (with a CSV download of the contact group only, never the holdout), customer lookup (live next to stored), what-if, and the assumptions. It talks only to the API, runs in its own small image with its own pinned dependencies, and none of the training stack. Its logic is in `src/dashboard_client.py` and tested without Streamlit; the pages are tested with Streamlit's test runner against a fake API, and were also driven against the live API and real data.
  - **Not yet:** authentication (everything is bound to localhost), scheduled scoring (Airflow, step 5), and monitoring of the stored predictions (step 6).
 
+Orchestration (step 5, in progress):
+ - **Airflow 3.3.2 with the Celery executor and Redis**, started with `docker compose --profile airflow up -d airflow-apiserver airflow-scheduler airflow-dag-processor airflow-worker airflow-triggerer` (the `airflow` profile keeps it out of a plain `up`). The scheduler queues tasks in Redis and the worker runs them. The interface is at `http://localhost:8080` (localhost only); log in with `AIRFLOW_ADMIN_USER` and `AIRFLOW_ADMIN_PASSWORD` from `.env`. Stop it with `docker compose --profile airflow stop`.
+ - **The pipeline is inside the Airflow image, in its own Python environment.** The image holds two environments on purpose: Airflow's own, with the library versions Airflow tests together, and `/opt/pipeline-venv`, built from this project's hashed lock file. Tasks run `/opt/pipeline-venv/bin/python -m src.main --stage ...`, so the pipeline runs on exactly the library versions the tests ran with (Airflow itself pins pandas 3.0.5 and numpy 2.5.3; the project is tested on 3.0.6 and 2.5.4). The image is large (about 4 GB).
+ - **Secrets come from `.env`, never from defaults.** The Airflow login, the key that encrypts stored connections and the key that signs tokens between services must be set (see `.env.example`); the `airflow-init` service refuses to run without them, and it checks that the database and the admin user really exist before anything else starts. The database URL is built from the existing `POSTGRES_*` settings by `services/airflow/db_url.py`, so the password is stored once and may contain special characters. Airflow's metadata lives in the `airflow` database of the same Postgres.
+ - **`pipeline_healthcheck`** is a DAG you run by hand (`docker compose --profile airflow exec airflow-scheduler airflow dags trigger pipeline_healthcheck`). It does no data work. It proves, through the Celery worker, that the pipeline's environment works, its command line starts, and Postgres and MLflow are reachable from where tasks run. Next: DAGs for the load, transform, train, score and plan stages.
+ - **Checked by running it:** a cold start brings all six services to healthy (about 1.5 GB of memory), the DAG's four tasks run through the Celery worker, and a task confirmed the pipeline environment reports the locked versions.
+
 Roadmap:
  1. Postgres + raw load (done)
  2. Staging cleaning, customer features and churn labels (done)
  3. Model training tracked in MLflow: RFM segmentation, churn, 90-day value (done)
  4. Batch scoring, outreach optimizer, FastAPI + Streamlit (done)
- 5. Airflow DAGs for ETL and retraining
+ 5. Airflow DAGs for ETL and retraining (in progress: the Airflow stack and a health-check DAG are done)
  6. Prometheus + Grafana monitoring (including drift checks), GitHub Actions CI
  7. (optional) deploy the API to local Kubernetes
 

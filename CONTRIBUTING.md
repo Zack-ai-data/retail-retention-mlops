@@ -102,6 +102,8 @@ docker compose run --rm quality python -m pytest -m "not e2e and not warehouse" 
 docker compose run --rm quality python -m pytest -m warehouse --require-warehouse  # real-data regression
 docker compose up -d api dashboard            # the API (:8000) and the dashboard (:8501)
 docker compose run --rm dashboard-tests       # the dashboard's own tests (they need Streamlit)
+docker compose --profile airflow up -d airflow-apiserver airflow-scheduler airflow-dag-processor airflow-worker airflow-triggerer   # Airflow, http://localhost:8080
+docker compose --profile airflow stop         # stop Airflow (its data is kept)
 ```
 
 The `app` image is the runtime image: runtime libraries only, no tests or dev tools, and it runs as a non-root user. The tests and dev tools live in the `quality` image. The `app` image holds a copy of the code from when it was built, so rebuild it (`docker compose build app`) after changing code, or the pipeline runs the old version.
