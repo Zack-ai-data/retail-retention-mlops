@@ -1,6 +1,12 @@
-**End to End Retail Retention MLOps pipeline: customer retention analytics on [UCI Online Retail II](https://archive.ics.uci.edu/dataset/502/online+retail+ii)**
+# End-to-End Consumer Retention MLE & MLOps pipeline
 
-Project Overview:
+[![CI](https://github.com/Zack-ai-data/retail-retention-mlops/actions/workflows/ci.yml/badge.svg)](https://github.com/Zack-ai-data/retail-retention-mlops/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**consumer retail retention analytics on [UCI Online Retail II](https://archive.ics.uci.edu/dataset/502/online+retail+ii)**
+
+## Project Overview
+
  - Dataset: ~1.07M transactions from a UK online gift retailer (Dec 2009 - Dec 2011), spread over two Excel sheets (CC BY 4.0, UCI Machine Learning Repository).
  - Goal: help a retailer keep its customers. Turn raw transactions into customer segments (RFM), churn and lifetime-value predictions, then decide where to spend a retention budget, served through an API and a dashboard.
  - Stack: PostgreSQL, Docker, MLflow, scikit-learn, FastAPI, Streamlit, and (planned) Airflow, Prometheus + Grafana, GitHub Actions.
