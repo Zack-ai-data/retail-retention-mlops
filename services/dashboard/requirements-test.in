@@ -1,0 +1,3 @@
+# The dashboard's dependencies plus what its tests need
+-r requirements.in
+pytest

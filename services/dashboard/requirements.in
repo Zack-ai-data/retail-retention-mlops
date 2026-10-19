@@ -1,0 +1,5 @@
+# Direct dependencies of the dashboard image. The exact versions, with hashes, are in
+# requirements.lock (see the command at the top of that file to regenerate it).
+streamlit
+requests
+pandas
