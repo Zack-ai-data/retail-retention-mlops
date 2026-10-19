@@ -46,17 +46,19 @@ def paired_bootstrap(
     candidate: npt.ArrayLike,
     reference: npt.ArrayLike,
     metric: Callable[[np.ndarray, np.ndarray], float],
-    n_resamples: int = N_BOOTSTRAP,
+    n_resamples: int | None = None,
     seed: int = config.RANDOM_STATE,
     level: float = CONFIDENCE_LEVEL,
 ) -> Gain:
     """Bootstrap the difference metric(y, candidate) - metric(y, reference) over customers.
 
     Both scores are evaluated on the same resampled customers, so the interval reflects how
-    much the *difference* moves, not how much each score moves. metric must be oriented so that
-    higher is better (pass a negated error for RMSE). Resamples where the metric is undefined,
-    for example a resample containing a single class, are skipped.
+    much the *difference* moves, not how much each score moves. n_resamples defaults to
+    N_BOOTSTRAP. metric must be oriented so that higher is better (pass a negated error for
+    RMSE). Resamples where the metric is undefined, for example a resample containing a single
+    class, are skipped.
     """
+    n_resamples = N_BOOTSTRAP if n_resamples is None else n_resamples
     y = np.asarray(y_true)
     a = np.asarray(candidate, dtype=float)
     b = np.asarray(reference, dtype=float)

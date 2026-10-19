@@ -82,7 +82,8 @@ Put its container setup in `services/<name>/` (Dockerfile and config), add it to
 docker compose up -d postgres mlflow          # start the services
 docker compose build                          # rebuild the images (after changing code or a lock file)
 docker compose run --rm app                   # run the pipeline (load, transform, train)
-docker compose run --rm quality               # the full gate (about 15 minutes)
+docker compose run --rm quality               # the gate, with the fast training tests (about 14 minutes)
+docker compose run --rm -e FULL_TRAINING_TESTS=1 quality   # the same, with the real hyperparameter grids (about 25 minutes)
 docker compose run --rm quality python -m pytest -m "not e2e and not warehouse"   # quick feedback
 docker compose run --rm quality python -m pytest -m warehouse --require-warehouse  # real-data regression
 docker compose up -d api dashboard            # the API (:8000) and the dashboard (:8501)
@@ -97,6 +98,10 @@ The `app` image is the runtime image: runtime libraries only, no tests or dev to
 - After changing `pyproject.toml`, regenerate both lock files with the command at the top of each file, then rebuild the images. Add `-c` with the output of `pip freeze` to keep today's versions instead of taking the newest allowed ones; then run the gate, because a library upgrade can change model results.
 - Training runs are tagged with where they came from: `git_sha`, the checksum of the Excel file that was loaded (`raw_file_sha256`, recorded at load time in `raw.load_log`), a checksum of the transform SQL, the lock file checksum and library versions. The image has no `.git` folder, so pass the commit when building: `GIT_SHA=$(git rev-parse HEAD) docker compose build`. Without it the tag says `unknown`.
 
-Continuous integration (`.github/workflows/ci.yml`) runs the same checks on every push and pull request, except the tests that need the real dataset loaded into Postgres (marked `warehouse`, they load 1M rows and take minutes), which stay a local check. Run `pytest -m warehouse --require-warehouse` yourself before merging a change to the SQL, features or models.
+Continuous integration (`.github/workflows/ci.yml`) has four jobs. `quality` (lint, format, strict types and the fast tests) and `dashboard` (the Streamlit tests) run on every push and pull request and are the checks a pull request must pass. `full-training` (the same tests with the real hyperparameter grids and 1,000 bootstrap resamples) and `regression` (loads the real dataset and checks the pinned results reproduce) run after a merge to `main` and by hand; they cannot be required checks because they do not run on pull requests, so a red run on `main` is fixed with a new pull request.
+
+### Fast and full training tests
+
+Tests that train models check plumbing (is the decision logged, is the model registered), not the numbers, so by default they train with one hyperparameter combination per algorithm and 100 bootstrap resamples (the `quick_training` fixture in `tests/conftest.py`). That more than halves the run time. `FULL_TRAINING_TESTS=1` switches to the real grids and 1,000 resamples. Tests marked `warehouse` always use the real settings, because they pin the real results. `tests/test_training_modes.py` checks which mode is active, so neither can silently turn into the other. Do not lower an assertion to make a quick-mode test pass: if a test only passes with the real settings, it belongs in the full run.
 
 Not set up yet: pre-commit hooks and vulnerability scanning of the dependencies.
