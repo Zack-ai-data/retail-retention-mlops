@@ -20,6 +20,54 @@ x-app-base: &app-base
     # occasionally stalls) on small datasets like this one
     OMP_NUM_THREADS: ${OMP_NUM_THREADS:-4}
 
+# Settings shared by the Airflow services (profile `airflow`; start with `docker compose up -d
+# airflow-apiserver`). Airflow runs with the Celery executor: the scheduler queues tasks in Redis
+# and the worker runs them. The pipeline is in the image, in its own Python environment.
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: services/airflow/Dockerfile
+    args:
+      GIT_SHA: ${GIT_SHA:-unknown}
+  image: retail-airflow:dev
+  profiles: ["airflow"]
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    # The database URLs are built from the POSTGRES_* variables, so the password stays in .env
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_CMD: python /opt/airflow/db_url.py
+    AIRFLOW__CELERY__RESULT_BACKEND_CMD: python /opt/airflow/db_url.py --celery
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # one machine, and training is heavy: two tasks at a time is plenty
+    AIRFLOW__CELERY__WORKER_CONCURRENCY: "2"
+    # what the pipeline tasks need (the same settings as the `app` service)
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    POSTGRES_DB: ${POSTGRES_DB}
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    DATA_PATH: /data/online_retail_II.xlsx
+    OMP_NUM_THREADS: ${OMP_NUM_THREADS:-4}
+  volumes:
+    - ./services/airflow/dags:/opt/airflow/dags:ro
+    - airflow-logs:/opt/airflow/logs
+    - ./data:/data:ro
+  depends_on: &airflow-depends
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    mlflow:
+      condition: service_healthy
+
 services:
   postgres:
     image: postgres:16
@@ -166,6 +214,146 @@ services:
       - -c
       - ruff check . && ruff format --check . && mypy && python -m pytest --cov -q
 
+  # ----------------------------------------------------------------------------------- Airflow
+  # Message broker for the Celery executor. Not published to the host.
+  redis:
+    # 7.2 is the last release under the original open-source licence (the same pin Airflow uses)
+    image: redis:7.2-bookworm
+    profiles: ["airflow"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  # Runs once: migrates Airflow's database and creates the admin user. It refuses to start without
+  # the secrets in .env (see .env.example), so Airflow is never left running with default logins.
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        missing=""
+        for name in AIRFLOW__CORE__FERNET_KEY AIRFLOW__API_AUTH__JWT_SECRET _AIRFLOW_WWW_USER_PASSWORD; do
+          if [ -z "$${!name}" ]; then missing="$$missing $$name"; fi
+        done
+        if [ -n "$$missing" ]; then
+          echo "ERROR: these settings are empty:$$missing"
+          echo "Set AIRFLOW_FERNET_KEY, AIRFLOW_JWT_SECRET and AIRFLOW_ADMIN_PASSWORD in .env (see .env.example)."
+          exit 1
+        fi
+        mkdir -p /opt/airflow/logs
+        chown -R "$${AIRFLOW_UID:-50000}:0" /opt/airflow/logs
+        # The image's entrypoint migrates the database and creates the admin user because of the
+        # _AIRFLOW_* settings below, but it carries on even when that fails. So check the result:
+        # init must fail loudly, or every other service would start on a broken database.
+        /entrypoint airflow version
+        /entrypoint airflow db check || { echo "ERROR: Airflow cannot use its database."; exit 1; }
+        /entrypoint airflow users list | grep -q " $${_AIRFLOW_WWW_USER_USERNAME} " \
+          || { echo "ERROR: the admin user was not created."; exit 1; }
+        echo "Airflow database and admin user are ready."
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-}
+    user: "0:0"
+
+  # The web interface and API. http://localhost:8080
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: retail-airflow-apiserver
+    command: api-server
+    ports:
+      - "127.0.0.1:${AIRFLOW_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: retail-airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: retail-airflow-dag-processor
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Runs the tasks, in the pipeline's own environment
+  airflow-worker:
+    <<: *airflow-common
+    container_name: retail-airflow-worker
+    command: celery worker
+    healthcheck:
+      test: ["CMD-SHELL", 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    environment:
+      <<: *airflow-env
+      # lets the worker finish its tasks cleanly when it is stopped
+      DUMB_INIT_SETSID: "0"
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends
+      airflow-apiserver:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: retail-airflow-triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+
 volumes:
   pgdata:
   mlartifacts:
+  airflow-logs:
