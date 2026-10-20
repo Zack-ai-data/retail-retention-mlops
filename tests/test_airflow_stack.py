@@ -287,3 +287,102 @@ def test_the_healthcheck_dag_never_prints_secrets():
     # nothing here dumps the environment, where the secrets are
     assert "os.environ" not in lowered and "printenv" not in lowered
     assert not re.search(r"\benv\b", lowered)
+
+
+# ------------------------------------------------------- shared helpers and the ETL DAG
+
+DAGS = AIRFLOW / "dags"
+COMMON_SOURCE = (DAGS / "pipeline_common.py").read_text(encoding="utf-8")
+ETL_SOURCE = (DAGS / "retail_etl.py").read_text(encoding="utf-8")
+CHECK_DAGS_SOURCE = (AIRFLOW / "check_dags.py").read_text(encoding="utf-8")
+
+
+def _imported_modules(source):
+    imported = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    return imported
+
+
+def _task(source, task_id):
+    """The text of the stage(...) call that creates one task."""
+    match = re.search(rf'stage\(\s*"{task_id}",.*?\n    \)', source, re.DOTALL)
+    assert match, f"no task {task_id!r}"
+    return match.group(0)
+
+
+def test_the_stage_names_the_dags_may_use_are_the_ones_the_command_line_accepts():
+    main_source = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
+    cli = set(re.findall(r'"(\w+)"', re.search(r"choices=\[(.*?)\]", main_source).group(1)))
+    dag_stages = set(
+        re.findall(r'"(\w+)"', re.search(r"STAGES = \((.*?)\)", COMMON_SOURCE).group(1))
+    )
+
+    assert dag_stages == cli - {"all"}  # "all" would hide which step failed, so DAGs do not use it
+
+
+def test_an_unknown_stage_is_rejected_when_the_dag_is_loaded():
+    assert "raise ValueError" in COMMON_SOURCE
+    assert "if name not in STAGES" in COMMON_SOURCE
+
+
+def test_every_stage_task_starts_from_the_pipeline_python_not_airflows_own():
+    assert 'PIPELINE = "cd $PIPELINE_HOME && $PIPELINE_PYTHON"' in COMMON_SOURCE
+    assert 'bash_command=f"{PIPELINE} -m src.main --stage {name}"' in COMMON_SOURCE
+
+
+def test_dag_modules_import_only_airflow_the_standard_library_and_each_other():
+    sibling_modules = {path.stem for path in DAGS.glob("*.py")}
+
+    for source in (COMMON_SOURCE, ETL_SOURCE):
+        assert _imported_modules(source) <= {"airflow", "datetime"} | sibling_modules
+
+
+def test_the_etl_dag_runs_only_when_started_by_hand_and_never_twice_at_once():
+    assert 'dag_id="retail_etl"' in ETL_SOURCE
+    assert "schedule=None" in ETL_SOURCE
+    assert "catchup=False" in ETL_SOURCE
+    assert "max_active_runs=1" in ETL_SOURCE
+
+
+def test_the_etl_dag_loads_before_it_transforms():
+    assert '"load_raw",\n        "load",' in ETL_SOURCE
+    assert '"transform_marts",\n        "transform",' in ETL_SOURCE
+    assert "load_raw >> transform_marts" in ETL_SOURCE
+
+
+def test_a_failed_quality_check_is_not_retried_but_a_failed_load_is_retried_once():
+    assert "retries=1" in _task(ETL_SOURCE, "load_raw")
+    assert "retries=0" in _task(ETL_SOURCE, "transform_marts")
+
+
+def test_every_etl_task_has_a_time_limit():
+    for task_id in ("load_raw", "transform_marts"):
+        assert "execution_timeout=" in _task(ETL_SOURCE, task_id)
+
+
+def test_only_the_transform_reports_the_feature_table_as_refreshed():
+    assert "outlets=[CUSTOMER_SNAPSHOTS]" in _task(ETL_SOURCE, "transform_marts")
+    assert "outlets" not in _task(ETL_SOURCE, "load_raw")  # raw data alone is not ready to train on
+    assert "marts/customer_snapshots" in COMMON_SOURCE
+
+
+def test_the_dag_check_script_lists_exactly_the_dags_in_the_folder():
+    dag_ids = set()
+    for path in DAGS.glob("*.py"):
+        dag_ids |= set(re.findall(r'dag_id="(\w+)"', path.read_text(encoding="utf-8")))
+    expected = set(
+        re.findall(r'"(\w+)"', re.search(r"EXPECTED = \{(.*?)\}", CHECK_DAGS_SOURCE).group(1))
+    )
+
+    assert expected == dag_ids
+
+
+def test_the_etl_dag_prints_no_secrets():
+    lowered = (COMMON_SOURCE + ETL_SOURCE).lower()
+
+    assert "password" not in lowered and "secret" not in lowered
+    assert "os.environ" not in lowered and "printenv" not in lowered
