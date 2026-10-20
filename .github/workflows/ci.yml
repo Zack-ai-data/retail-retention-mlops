@@ -5,6 +5,8 @@
 #                  (tests/conftest.py), so it takes minutes, not the 23 it took with the real
 #                  settings. This and `dashboard` are the checks a pull request must pass.
 #   dashboard      the Streamlit dashboard's tests, from their own lock file.
+#   airflow-dags   every push and pull request: builds the Airflow image and loads every DAG in it.
+#                  Advisory: not a required check yet (see the job).
 #   full-training  after a merge to main (and by hand): the same tests with the real
 #                  hyperparameter grids and 1,000 resamples (FULL_TRAINING_TESTS=1).
 #   regression     after a merge to main (and by hand): loads the real dataset and checks that
@@ -106,6 +108,44 @@ jobs:
 
       - name: Dashboard tests
         run: python -m pytest tests/test_dashboard_client.py tests/test_dashboard_ui.py -q --noconftest
+
+  # Builds the Airflow image and loads every DAG in it, the way Airflow does. A DAG with a mistake
+  # (a typo in a stage name, a bad import) is silently left out of Airflow and only shows up as an
+  # import error in its interface; here it fails the build. Nothing is published.
+  #
+  # Advisory for now: it is not one of the checks a pull request must pass (the repository
+  # ruleset requires only `quality` and `dashboard`). Make it required once its timing is known.
+  # The image is large, so its layers are cached: the slow step (the pipeline's libraries) only
+  # rebuilds when requirements.lock changes.
+  airflow-dags:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the Airflow image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/airflow/Dockerfile
+          load: true
+          push: false
+          tags: retail-airflow:ci
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=airflow
+          cache-to: type=gha,scope=airflow,mode=max
+
+      - name: The pipeline's own environment starts
+        run: docker run --rm retail-airflow:ci bash -c 'cd "$PIPELINE_HOME" && "$PIPELINE_PYTHON" -m src.main --help'
+
+      - name: Load every DAG
+        run: >-
+          docker run --rm
+          -v "$PWD/services/airflow/dags:/opt/airflow/dags:ro"
+          -v "$PWD/services/airflow/check_dags.py:/check_dags.py:ro"
+          retail-airflow:ci python /check_dags.py
 
   # The training tests again with the real hyperparameter grids and 1,000 bootstrap resamples.
   full-training:
