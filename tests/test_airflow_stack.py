@@ -381,6 +381,63 @@ def test_the_dag_check_script_lists_exactly_the_dags_in_the_folder():
     assert expected == dag_ids
 
 
+# ------------------------------------------------------------ the DAG check in CI
+
+CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+
+def _ci_job(name):
+    """The text of one job in ci.yml, up to the next job or the comment above it."""
+    match = re.search(rf"\n  {name}:\n(.*?)(?=\n  (?:# |[a-z-]+:)|\Z)", CI, re.DOTALL)
+    assert match, f"no job {name!r} in ci.yml"
+    return match.group(1)
+
+
+def test_ci_loads_every_dag_in_the_airflow_image_on_pull_requests():
+    job = _ci_job("airflow-dags")
+
+    # no condition: it runs on pull requests and on main (the job text starts at its first key)
+    assert not re.search(r"^    if:", job, flags=re.MULTILINE)
+    assert "file: services/airflow/Dockerfile" in job
+    assert "python /check_dags.py" in job
+    assert "timeout-minutes:" in job
+
+
+def test_ci_mounts_the_real_dags_and_the_check_read_only():
+    job = _ci_job("airflow-dags")
+
+    assert '-v "$PWD/services/airflow/dags:/opt/airflow/dags:ro"' in job
+    assert '-v "$PWD/services/airflow/check_dags.py:/check_dags.py:ro"' in job
+
+
+def test_ci_builds_the_airflow_image_without_publishing_or_logging_in():
+    job = _ci_job("airflow-dags")
+
+    assert "push: false" in job and "load: true" in job
+    assert "login-action" not in job and "secrets." not in job
+
+
+def test_ci_caches_the_airflow_image_layers_apart_from_other_images():
+    job = _ci_job("airflow-dags")
+
+    assert "cache-from: type=gha,scope=airflow" in job
+    assert "cache-to: type=gha,scope=airflow,mode=max" in job
+
+
+def test_the_airflow_images_entrypoint_needs_bash_not_sh_to_run_a_shell_command():
+    # the image's entrypoint passes only `bash` and `python` straight through; anything else is
+    # read as an Airflow command and fails ("invalid choice: 'sh'")
+    job = _ci_job("airflow-dags")
+
+    assert "retail-airflow:ci bash -c" in job
+    assert "retail-airflow:ci sh " not in job
+
+
+def test_the_dag_job_does_not_replace_the_required_checks():
+    assert _ci_job("quality") and _ci_job("dashboard")
+    assert "airflow-dags" not in _ci_job("quality") + _ci_job("dashboard")
+
+
 def test_the_etl_dag_prints_no_secrets():
     lowered = (COMMON_SOURCE + ETL_SOURCE).lower()
 

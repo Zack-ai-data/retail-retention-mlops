@@ -2,7 +2,7 @@
 
 A DAG with a mistake (a typo in a stage name, a bad import) is silently left out of Airflow and
 only shows up as an import error in its interface. This script makes that a failing check. Run it
-in the Airflow image with the DAGs folder mounted (nothing runs it automatically yet):
+in the Airflow image with the DAGs folder mounted. CI does this in the `airflow-dags` job:
 
     docker run --rm -v "$PWD/services/airflow/dags:/opt/airflow/dags:ro" \\
         -v "$PWD/services/airflow/check_dags.py:/check_dags.py:ro" retail-airflow:ci \\
