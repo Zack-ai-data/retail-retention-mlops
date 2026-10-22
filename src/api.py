@@ -14,6 +14,9 @@ inputs more current. Every answer says which model versions produced it.
 Only customers in the models' population (bought within the last 180 days) can be scored; others
 are lapsed customers for a win-back list, and asking about them is an explained error, not a
 meaningless number. There is no authentication: this is a local service bound to 127.0.0.1.
+
+GET /metrics exposes traffic, latency and the model versions being served for Prometheus
+(see src/metrics.py).
 """
 
 import logging
@@ -23,11 +26,12 @@ from typing import Annotated, Any, Literal
 
 import pandas as pd
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from src import config, database, features, optimizer, scoring, tracking
 from src.errors import DatabaseUnavailableError, PipelineError
+from src.metrics import METRICS_PATH, ApiMetrics
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +126,7 @@ def _default_loader() -> scoring.Champions:
 
 def create_app(load_champions: Callable[[], scoring.Champions] = _default_loader) -> FastAPI:
     """Build the API. load_champions is replaceable so tests can run without a model registry."""
+    metrics = ApiMetrics()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> Any:
@@ -141,6 +146,7 @@ def create_app(load_champions: Callable[[], scoring.Champions] = _default_loader
             app.state.champions = None
             app.state.load_error = str(exc)
             log.error("Models not loaded: %s", exc)
+        metrics.observe_models(app.state.champions)
 
     app = FastAPI(
         title="Retail retention API",
@@ -149,6 +155,13 @@ def create_app(load_champions: Callable[[], scoring.Champions] = _default_loader
         "and what they do not claim.",
         lifespan=lifespan,
     )
+    app.state.metrics = metrics
+    app.middleware("http")(metrics.middleware)
+
+    @app.get(METRICS_PATH, include_in_schema=False)
+    def prometheus_metrics() -> Response:
+        """Traffic, latency and the model versions being served, for Prometheus to scrape."""
+        return metrics.render()
 
     def champions(request: Request) -> scoring.Champions:
         loaded = request.app.state.champions

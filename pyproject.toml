@@ -15,6 +15,7 @@ dependencies = [
     "fastapi",
     "pydantic",
     "uvicorn",
+    "prometheus-client",  # the API's /metrics endpoint
     "pandas",
     "numpy",
     "scipy",
@@ -28,7 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # sqlalchemy + alembic: lets tests use a throwaway SQLite MLflow store (the server uses Postgres)
-dev = ["pytest", "pytest-cov", "ruff", "mypy", "sqlalchemy", "alembic", "cloudpickle", "httpx"]
+dev = ["pytest", "pytest-cov", "ruff", "mypy", "sqlalchemy", "alembic", "cloudpickle", "httpx", "pyyaml"]
 
 [tool.setuptools]
 packages = ["src"]

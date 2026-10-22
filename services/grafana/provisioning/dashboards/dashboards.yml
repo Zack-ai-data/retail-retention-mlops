@@ -1,0 +1,15 @@
+# Loads the dashboards in services/grafana/dashboards/ (mounted read-only), so they are reviewed
+# and versioned like code. A dashboard edited in the Grafana interface is not saved: change the
+# JSON file instead.
+
+apiVersion: 1
+
+providers:
+  - name: retail
+    orgId: 1
+    folder: Retail retention
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana-dashboards

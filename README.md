@@ -9,7 +9,7 @@
 
  - Dataset: ~1.07M transactions from a UK online gift retailer (Dec 2009 - Dec 2011), spread over two Excel sheets (CC BY 4.0, UCI Machine Learning Repository).
  - Goal: help a retailer keep its customers. Turn raw transactions into customer segments (RFM), churn and lifetime-value predictions, then decide where to spend a retention budget, served through an API and a dashboard.
- - Stack: PostgreSQL, Docker, MLflow, Airflow, scikit-learn, FastAPI, Streamlit, GitHub Actions, and (planned) Prometheus + Grafana.
+ - Stack: PostgreSQL, Docker, MLflow, Airflow, scikit-learn, FastAPI, Streamlit, Prometheus, Grafana, GitHub Actions.
  - Status: **steps 1-5 done** - Postgres in Docker, raw load, cleaned staging layer, customer feature/label snapshots with automated data quality checks, and three models (churn, 90-day customer value, RFM segments) tracked and registered in MLflow with a promotion quality gate. Lint, strict type checking, a coverage threshold and explicit error handling are in place (see Code quality). Batch scoring, an outreach optimizer with a random holdout, a FastAPI service and a Streamlit dashboard sit on top of the models. Airflow runs the pipeline as DAGs (ETL, then retraining and scoring). Monitoring is planned (see Roadmap).
 
 Repo Structure:
@@ -45,9 +45,11 @@ sql/
   schema/         idempotent DDL (schemas, raw table, segment output table), applied on every run
   transform/      SQL that rebuilds staging and marts from raw (the cleaning and feature logic)
 services/         one folder per supporting service's container setup
-  mlflow/         MLflow server image and entrypoint (Airflow, Prometheus and Grafana will join it here)
+  mlflow/         MLflow server image and entrypoint
   dashboard/      the Streamlit dashboard: app, its own image and its own pinned dependencies
   airflow/        Airflow (Celery executor): image with the pipeline inside it, the DAGs, and the database-URL helper
+  prometheus/     Prometheus configuration (it scrapes the API's /metrics)
+  grafana/        Grafana: data sources and dashboards as files, and the read-only database login's SQL
 tests/            pytest suite: unit, database, end-to-end pipeline, error-path and real-warehouse
                   regression tests (database tests use a throwaway Postgres database,
                   model tests a throwaway SQLite MLflow store)
@@ -163,13 +165,21 @@ Orchestration (step 5):
  - **Retraining DAG, checked on the real data:** one run through Airflow and the Celery worker took about 3 minutes (train 2 min 22 s). All three models went from version 3 to version 4 and were promoted, with the same metrics as before (churn PR-AUC 0.652 against the recency baseline's 0.535; value Spearman 0.592 against 0.440). Scoring run 2 matched run 1 exactly on all 3,471 customers (largest difference 0 in churn probability, spend and margin at risk), and plan 2 selected the same 500 customers as plan 1 (same seed). A second run was started only by triggering `retail_etl`: the retraining DAG started by itself (run type `asset_triggered`) in the same second the transform finished, its four tasks succeeded, the models went to version 5 with the same decisions, and scoring run 3 matched run 2 exactly (plan 3 selected the same 500 customers). A rejection has not happened in a real run, because the gate promoted every model. That path is covered two ways: the report logic is tested against a real model registry, and a throwaway DAG with the same operator settings confirmed in Airflow that a task exiting 99 ends as skipped while `score` and `plan` still succeed and the run is marked success.
  - **Not yet:** failure alerts, and a metric for how long since a model was last promoted (step 6).
 
+Monitoring (step 6, in progress):
+ - **Started with** `docker compose --profile monitoring up -d` (the `monitoring` profile keeps it out of a plain `up`; start the API too so there is something to scrape: `docker compose up -d api`). Grafana is at `http://localhost:3000` (log in with `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD` from `.env`; Grafana's built-in `admin/admin` is never used, because it refuses to start with an empty password), Prometheus at `http://localhost:9090`. Both are bound to localhost, run pinned image versions, and add roughly 140 MB of memory together. To stop only monitoring: `docker compose stop grafana prometheus` (`docker compose --profile monitoring stop` also stops Postgres and MLflow, which are in the default set).
+ - **The API exposes `GET /metrics`** (`src/metrics.py`): requests, latency and failures per route, requests in progress, and the version of each champion model it is serving. Routes are labelled by their template (`/customers/{customer_id}/score`), never by the URL that was requested, so a customer id can never become a metric label or create a time series of its own. The served-version gauge shows something that was invisible before: the API loads the champions at start-up and on `POST /models/reload`, so after a retrain promotes a new champion it keeps serving the old one until it is reloaded.
+ - **Grafana reads Postgres directly** (the warehouse, Airflow's and MLflow's databases), through `grafana_ro`, a login that can only read. It is created by the `grafana-db-init` job (repeatable; Postgres only runs `sql/init` on a brand-new volume) from `services/grafana/readonly_user.sql`, with the password from `.env`. It has named tables and, in the Airflow and MLflow databases, named columns only: no customer-level data, no Airflow connections or variables or run arguments, no MLflow artifact paths. Prometheus is only needed for the API's own metrics.
+ - **Everything Grafana shows is a file in the repository** (`services/grafana/`): the data sources and the dashboards are loaded at start-up from read-only mounts, so a fresh start gives the same Grafana. The starter dashboard "Retail API" puts the model version the API is serving beside the champion in the MLflow registry, so a gap between them is visible.
+ - **Checked by running it** on the real stack: Prometheus scraped the API (both targets up); all four Grafana data sources reported a working connection; the dashboard loaded; a query through Grafana to MLflow's database returned the registry champion (version 5), matching the version the API served. The read-only login was tried with 37 actions: the 7 reads it should have worked and the 30 other reads and writes were refused, including reading customer scores, Airflow's connection and variable tables, `dag_run.conf`, MLflow's run tables and artifact paths, inserting, updating, deleting, truncating, dropping, creating tables or roles, and switching the session out of read-only mode and then inserting. Nothing was created or changed by those attempts.
+ - **Not yet:** dashboards built from the stored data (per-snapshot churn rate, the model's gain over the baseline by backtest origin, score distributions), a drift check on the stored predictions, alert rules, and a scheduled CI run. The API dashboard is nearly flat until the API has traffic; the models do not change either, because the dataset is static and training is deterministic.
+
 Roadmap:
  1. Postgres + raw load (done)
  2. Staging cleaning, customer features and churn labels (done)
  3. Model training tracked in MLflow: RFM segmentation, churn, 90-day value (done)
  4. Batch scoring, outreach optimizer, FastAPI + Streamlit (done)
  5. Airflow DAGs for ETL and retraining (done)
- 6. Prometheus + Grafana monitoring (including drift checks), GitHub Actions CI
+ 6. Prometheus + Grafana monitoring (in progress: the API's metrics, Prometheus, Grafana and a read-only database login are done; dashboards from the stored data, drift checks, alerts and a scheduled CI run remain), GitHub Actions CI (done)
  7. (optional) deploy the API to local Kubernetes
 
 ## License

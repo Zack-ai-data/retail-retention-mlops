@@ -357,7 +357,102 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  # ------------------------------------------------------------------------------------------
+  # Monitoring (profile "monitoring", so a plain `up` does not start it).
+  #   docker compose --profile monitoring up -d        Grafana http://localhost:3000
+  # Prometheus scrapes the API's /metrics (start the API too: docker compose up -d api). Grafana
+  # reads Postgres directly through a read-only role. Both are bound to localhost.
+  # ------------------------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    container_name: retail-prometheus
+    profiles: ["monitoring"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./services/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  # Creates (or updates) the read-only Postgres login Grafana uses, then exits. Postgres only runs
+  # sql/init on a brand-new volume, so this is a repeatable step of its own. It refuses to run
+  # without a password, and the password reaches the script through the environment, not a command
+  # line.
+  grafana-db-init:
+    image: postgres:16
+    profiles: ["monitoring"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-}
+      WAREHOUSE_DB: ${POSTGRES_DB}
+    volumes:
+      - ./services/grafana/readonly_user.sql:/readonly_user.sql:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        [ -n "$$GRAFANA_DB_PASSWORD" ] || { echo "GRAFANA_DB_PASSWORD is empty: set it in .env (see .env.example)" >&2; exit 1; }
+        exec psql -v ON_ERROR_STOP=1 -d postgres -f /readonly_user.sql
+    restart: "no"
+
+  grafana:
+    image: grafana/grafana-oss:12.4.3
+    container_name: retail-grafana
+    profiles: ["monitoring"]
+    depends_on:
+      grafana-db-init:
+        condition: service_completed_successfully
+      prometheus:
+        condition: service_healthy
+    # Grafana's built-in login is admin/admin, so refuse to start without a password from .env
+    entrypoint:
+      - sh
+      - -c
+      - |
+        [ -n "$$GF_SECURITY_ADMIN_PASSWORD" ] || { echo "GRAFANA_ADMIN_PASSWORD is empty: set it in .env (see .env.example)" >&2; exit 1; }
+        exec /run.sh
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # used by services/grafana/provisioning/datasources/datasources.yml
+      POSTGRES_DB: ${POSTGRES_DB}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-}
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./services/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./services/grafana/dashboards:/var/lib/grafana-dashboards:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
 volumes:
   pgdata:
   mlartifacts:
   airflow-logs:
+  prometheus-data:
+  grafana-data:
