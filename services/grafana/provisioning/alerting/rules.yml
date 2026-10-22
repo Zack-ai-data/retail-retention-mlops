@@ -1,0 +1,602 @@
+# Alert rules, loaded by Grafana at start-up. Edit this file, then `docker compose restart grafana`.
+# They are evaluated every 5 minutes and their state is shown in
+# Grafana under Alerting > Alert rules. NOTHING IS SENT ANYWHERE: no contact point is configured
+# (that needs an email or chat account), so an alert is only visible in Grafana.
+#
+# Thresholds: drift uses the usual PSI convention (0.25 and above is a large shift); the 90 days for
+# an old champion and the 15 minutes before a stale API model is reported are assumptions.
+apiVersion: 1
+groups:
+- orgId: 1
+  name: retail-monitoring
+  folder: Retail retention alerts
+  interval: 5m
+  rules:
+  - uid: retail-drift-churn-probability
+    title: Churn probability drift is large
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-warehouse
+      model:
+        refId: A
+        format: time_series
+        rawQuery: true
+        editorMode: code
+        rawSql: SELECT now() AS time, (status = 'alert')::int::float8 AS value FROM ml.monitor_drift WHERE
+          snapshot_date = (SELECT max(snapshot_date) FROM ml.monitor_drift) AND column_name = 'p_churn'
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        datasource: &id001
+          type: __expr__
+          uid: __expr__
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        datasource: *id001
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+          type: query
+    noDataState: OK
+    execErrState: Error
+    for: 0s
+    annotations:
+      summary: The model's churn probabilities have moved a lot from the same season a year earlier.
+      description: PSI of p_churn for the latest snapshot is at or above 0.25 (large shift). See the Drift
+        dashboard. Inputs that moved are listed there; consider whether the customer base changed or the
+        data feed broke.
+    labels:
+      severity: alert
+    isPaused: false
+  - uid: retail-drift-inputs
+    title: Model input columns have drifted a lot
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-warehouse
+      model:
+        refId: A
+        format: time_series
+        rawQuery: true
+        editorMode: code
+        rawSql: SELECT now() AS time, count(*)::float8 AS value FROM ml.monitor_drift WHERE snapshot_date
+          = (SELECT max(snapshot_date) FROM ml.monitor_drift) AND status = 'alert' AND column_name <>
+          'p_churn'
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        datasource: *id001
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+          type: query
+    noDataState: OK
+    execErrState: Error
+    for: 0s
+    annotations:
+      summary: At least one model input has moved a lot from the same season a year earlier.
+      description: One or more monitored input columns have a PSI of 0.25 or more for the latest snapshot.
+        See the Drift dashboard for which.
+    labels:
+      severity: alert
+    isPaused: false
+  - uid: retail-model-not-promoted
+    title: The newest model version was not promoted
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-warehouse
+      model:
+        refId: A
+        format: time_series
+        rawQuery: true
+        editorMode: code
+        rawSql: SELECT now() AS time, count(*)::float8 AS value FROM (SELECT DISTINCT ON (model_name)
+          decision FROM ml.monitor_model_versions ORDER BY model_name, version DESC) newest WHERE decision
+          <> 'promoted'
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        datasource: *id001
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+          type: query
+    noDataState: OK
+    execErrState: Error
+    for: 0s
+    annotations:
+      summary: A retrain did not produce a new champion, so the previous champion is still serving.
+      description: For at least one model the newest version was rejected by the promotion gate (or has
+        no recorded decision). A single rejection is a normal result; if it repeats, the data or the features
+        may have changed. See the Models dashboard for the reason.
+    labels:
+      severity: warning
+    isPaused: false
+  - uid: retail-champion-old
+    title: A champion model is older than 90 days
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-warehouse
+      model:
+        refId: A
+        format: time_series
+        rawQuery: true
+        editorMode: code
+        rawSql: SELECT now() AS time, coalesce(max(extract(epoch FROM now() - created_at) / 86400), 0)::float8
+          AS value FROM ml.monitor_model_versions WHERE is_champion
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        datasource: *id001
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 90
+          type: query
+    noDataState: OK
+    execErrState: Error
+    for: 0s
+    annotations:
+      summary: No model has been retrained for a quarter.
+      description: 'The oldest champion was created more than 90 days ago (one snapshot period). The 90
+        days is an assumption, not a measured limit: the data is refreshed quarterly.'
+    labels:
+      severity: warning
+    isPaused: false
+  - uid: retail-airflow-run-failed
+    title: The latest Airflow run of a pipeline DAG failed
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-airflow
+      model:
+        refId: A
+        format: time_series
+        rawQuery: true
+        editorMode: code
+        rawSql: SELECT now() AS time, count(*)::float8 AS value FROM (SELECT DISTINCT ON (dag_id) state
+          FROM dag_run WHERE dag_id IN ('retail_etl', 'retail_retrain_score') ORDER BY dag_id, queued_at
+          DESC) newest WHERE state = 'failed'
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        datasource: *id001
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+          type: query
+    noDataState: OK
+    execErrState: Error
+    for: 0s
+    annotations:
+      summary: A pipeline run failed.
+      description: The newest run of retail_etl or retail_retrain_score is in the failed state. Open Airflow
+        (http://localhost:8080) and read the failed task's log.
+    labels:
+      severity: alert
+    isPaused: false
+  - uid: retail-api-stale-churn-model
+    title: The API is serving an old churn model
+    condition: F
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-prometheus
+      model:
+        refId: A
+        expr: retail_api_model_version{model="churn"}
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-mlflow
+      model:
+        refId: B
+        format: time_series
+        rawQuery: true
+        editorMode: code
+        rawSql: SELECT now() AS time, (SELECT version::float8 FROM registered_model_aliases WHERE name
+          = 'retail-churn-classifier' AND alias = 'champion') AS value
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: reduce
+        expression: A
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: D
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: D
+        type: reduce
+        expression: B
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: E
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: E
+        type: math
+        expression: abs($C - $D)
+        datasource: *id001
+    - refId: F
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: F
+        type: threshold
+        expression: E
+        datasource: *id001
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+          type: query
+    noDataState: OK
+    execErrState: Error
+    for: 15m
+    annotations:
+      summary: The registry's churn champion is newer than the one the API is serving.
+      description: 'The API loads the champion models when it starts and on POST /models/reload, so after
+        a retrain it keeps serving the old churn model until it is reloaded. Run: curl -X POST http://localhost:8000/models/reload.
+        Fires only if the gap lasts 15 minutes.'
+    labels:
+      severity: warning
+    isPaused: false
+  - uid: retail-api-stale-value-model
+    title: The API is serving an old value model
+    condition: F
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-prometheus
+      model:
+        refId: A
+        expr: retail_api_model_version{model="value"}
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-mlflow
+      model:
+        refId: B
+        format: time_series
+        rawQuery: true
+        editorMode: code
+        rawSql: SELECT now() AS time, (SELECT version::float8 FROM registered_model_aliases WHERE name
+          = 'retail-value-regressor' AND alias = 'champion') AS value
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: reduce
+        expression: A
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: D
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: D
+        type: reduce
+        expression: B
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: E
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: E
+        type: math
+        expression: abs($C - $D)
+        datasource: *id001
+    - refId: F
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: F
+        type: threshold
+        expression: E
+        datasource: *id001
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+          type: query
+    noDataState: OK
+    execErrState: Error
+    for: 15m
+    annotations:
+      summary: The registry's value champion is newer than the one the API is serving.
+      description: 'The API loads the champion models when it starts and on POST /models/reload, so after
+        a retrain it keeps serving the old value model until it is reloaded. Run: curl -X POST http://localhost:8000/models/reload.
+        Fires only if the gap lasts 15 minutes.'
+    labels:
+      severity: warning
+    isPaused: false
+  - uid: retail-api-down
+    title: The API is not answering Prometheus
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-prometheus
+      model:
+        refId: A
+        expr: 1 - max(up{job="retail-api"})
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        datasource: *id001
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+          type: query
+    noDataState: Alerting
+    execErrState: Error
+    for: 2m
+    annotations:
+      summary: Prometheus cannot scrape the API.
+      description: 'The retail-api scrape target has been down for 2 minutes. Start it with: docker compose
+        up -d api'
+    labels:
+      severity: alert
+    isPaused: false
+  - uid: retail-api-server-errors
+    title: The API returned server errors
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-prometheus
+      model:
+        refId: A
+        expr: sum(increase(retail_api_requests_total{status=~"5.."}[10m]))
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        datasource: *id001
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+          type: query
+    noDataState: OK
+    execErrState: Error
+    for: 0s
+    annotations:
+      summary: The API answered at least one request with a 5xx status in the last 10 minutes.
+      description: 'A 5xx means the API itself failed, not that a caller asked for something wrong (those
+        are 4xx). Read the container log: docker logs retail-api'
+    labels:
+      severity: alert
+    isPaused: false

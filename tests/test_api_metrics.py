@@ -186,3 +186,50 @@ def test_each_app_has_its_own_metrics_so_building_several_does_not_collide():
 
         assert _value(first, "retail_api_requests_total", route="unmatched") == 1
         assert _value(second, "retail_api_requests_total", route="unmatched") is None
+
+
+# ------------------------------------------------------------------ demo and real traffic
+
+
+def test_requests_are_real_traffic_unless_they_carry_the_demo_header(plain):
+    plain.get("/items/1")
+    plain.get("/items/2", headers={metrics.DEMO_TRAFFIC_HEADER: "true"})
+    plain.get("/items/3", headers={metrics.DEMO_TRAFFIC_HEADER: "TRUE"})
+
+    real = _value(plain, "retail_api_requests_total", route="/items/{item_id}", traffic="real")
+    demo = _value(plain, "retail_api_requests_total", route="/items/{item_id}", traffic="demo")
+
+    assert (real, demo) == (1, 2)
+
+
+@pytest.mark.parametrize("sent", ["false", "yes", "1", "", "x" * 500, "real", "demo"])
+def test_any_other_header_value_is_real_traffic_so_the_label_has_only_two_values(plain, sent):
+    plain.get("/items/1", headers={metrics.DEMO_TRAFFIC_HEADER: sent})
+    plain.get("/items/2", headers={metrics.DEMO_TRAFFIC_HEADER: "true"})
+
+    values = {s.labels["traffic"] for s in _samples(plain) if "traffic" in s.labels}
+
+    assert values == {"real", "demo"}
+
+
+def test_latency_is_kept_apart_for_demo_and_real_traffic_too(plain):
+    plain.get("/items/1", headers={metrics.DEMO_TRAFFIC_HEADER: "true"})
+
+    assert (
+        _value(
+            plain,
+            "retail_api_request_duration_seconds_count",
+            route="/items/{item_id}",
+            traffic="demo",
+        )
+        == 1
+    )
+    assert (
+        _value(
+            plain,
+            "retail_api_request_duration_seconds_count",
+            route="/items/{item_id}",
+            traffic="real",
+        )
+        is None
+    )

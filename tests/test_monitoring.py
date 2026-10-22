@@ -16,7 +16,9 @@ from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INTERNAL_ERROR, RESOURCE_DOES_NOT_EXIST
 
 from src import config, database, features, main, monitoring, processor, scoring, tracking
-from src.errors import EmptyTableError  # noqa: F401  (documents what the stage raises)
+from src.errors import EmptyTableError, RegistryError  # noqa: F401
+from tests.test_drift import _ChurnByRecency
+from tests.test_model import make_panel
 from tests.test_scoring import RAW, stub_champions
 
 CHURN, VALUE, SEGMENTS = config.CHURN_MODEL_NAME, config.VALUE_MODEL_NAME, config.SEGMENT_MODEL_NAME
@@ -507,3 +509,122 @@ def test_a_version_registered_without_a_run_is_listed_but_has_no_metrics_or_back
 
     assert list(versions["version"]) == [1] and metrics.empty
     assert monitoring.backtest_table(mlflow_client).empty
+
+
+# ------------------------------------------------------------------------------------ drift
+
+
+def _drift_inputs(monkeypatch, panel, champion_error=None):
+    """Point the stage at a synthetic pair of December snapshots and a stand-in champion."""
+    monkeypatch.setattr(features, "load_snapshots", lambda conn: panel)
+
+    def load_champions(client):
+        if champion_error is not None:
+            raise champion_error
+        return SimpleNamespace(churn_model=_ChurnByRecency())
+
+    monkeypatch.setattr(scoring, "load_champions", load_champions)
+
+
+def _december_pair(seed=1):
+    return make_panel(
+        n=600, seed=seed, snapshots=[("2010-12-13", "train"), ("2011-12-10", "score")]
+    )
+
+
+def test_refresh_writes_one_drift_row_per_column_for_a_snapshot_with_a_year_earlier(
+    warehouse, mlflow_client, monkeypatch
+):
+    _drift_inputs(monkeypatch, _december_pair())
+
+    counts = monitoring.refresh(warehouse, mlflow_client)
+
+    stored = _table(warehouse, "ml.monitor_drift", "column_name")
+    assert counts["ml.monitor_drift"] == len(monitoring.DRIFT_COLUMNS) + 1 == len(stored)
+    assert set(stored["status"]) <= {"ok", "warn", "alert"}
+    assert set(stored["snapshot_date"]) == {pd.Timestamp("2011-12-10").date()}
+    assert set(stored["reference_date"]) == {pd.Timestamp("2010-12-13").date()}
+    assert "customer_id" not in stored.columns
+
+
+def test_a_refresh_replaces_the_drift_rows_and_does_not_add_to_them(
+    warehouse, mlflow_client, monkeypatch
+):
+    _drift_inputs(monkeypatch, _december_pair())
+
+    first = monitoring.refresh(warehouse, mlflow_client)
+    second = monitoring.refresh(warehouse, mlflow_client)
+
+    assert first == second
+
+
+def test_with_no_champion_yet_the_inputs_are_still_checked_and_it_says_what_was_left_out(
+    warehouse, mlflow_client, monkeypatch, caplog
+):
+    _drift_inputs(monkeypatch, _december_pair(), champion_error=RegistryError("no champion yet"))
+
+    with caplog.at_level(logging.WARNING, logger="src.monitoring"):
+        monitoring.refresh(warehouse, mlflow_client)
+
+    stored = _table(warehouse, "ml.monitor_drift", "column_name")
+    assert monitoring.CHURN_PROBABILITY not in set(stored["column_name"])
+    assert len(stored) == len(monitoring.DRIFT_COLUMNS)
+    assert "churn probability drift is left out" in caplog.text
+
+
+def test_an_mlflow_failure_while_loading_the_champion_stops_the_stage_and_keeps_the_old_tables(
+    warehouse, mlflow_client, monkeypatch
+):
+    _drift_inputs(monkeypatch, _december_pair())
+    monitoring.refresh(warehouse, mlflow_client)
+    before = _table(warehouse, "ml.monitor_drift", "column_name")
+    _drift_inputs(
+        monkeypatch, _december_pair(seed=9), champion_error=MlflowException("server error")
+    )
+
+    with pytest.raises(MlflowException, match="server error"):
+        monitoring.refresh(warehouse, mlflow_client)
+
+    pd.testing.assert_frame_equal(_table(warehouse, "ml.monitor_drift", "column_name"), before)
+
+
+def test_a_deliberately_shifted_snapshot_shows_up_as_alerts_in_the_table(
+    warehouse, mlflow_client, monkeypatch
+):
+    panel = _december_pair(seed=3)
+    panel.loc[panel["snapshot_date"] == pd.Timestamp("2011-12-10").date(), "frequency_365d"] *= 3
+    _drift_inputs(monkeypatch, panel)
+
+    monitoring.refresh(warehouse, mlflow_client)
+
+    stored = _table(warehouse, "ml.monitor_drift", "column_name").set_index("column_name")
+    assert stored.loc["frequency_365d", "status"] == "alert"
+    assert stored.loc["is_uk", "status"] == "ok"
+
+
+def test_every_drift_status_can_be_stored_in_the_table(warehouse, mlflow_client, monkeypatch):
+    # the real data has no warning rows in the latest comparison, so make one of each
+    rows = [
+        (pd.Timestamp("2011-12-10").date(), pd.Timestamp("2010-12-13").date(), name, psi, status)
+        for name, psi, status in [("a", 0.01, "ok"), ("b", 0.12, "warn"), ("c", 0.6, "alert")]
+    ]
+    drift = pd.DataFrame(rows, columns=monitoring.DRIFT_TABLE_COLUMNS)
+    monkeypatch.setattr(monitoring, "_drift", lambda conn, client: drift)
+
+    monitoring.refresh(warehouse, mlflow_client)
+
+    stored = _table(warehouse, "ml.monitor_drift", "column_name")
+    assert list(stored["status"]) == ["ok", "warn", "alert"]
+
+
+def test_a_status_outside_ok_warn_alert_is_refused_by_the_table(
+    warehouse, mlflow_client, monkeypatch
+):
+    bad = pd.DataFrame(
+        [(pd.Timestamp("2011-12-10").date(), pd.Timestamp("2010-12-13").date(), "a", 0.5, "fine")],
+        columns=monitoring.DRIFT_TABLE_COLUMNS,
+    )
+    monkeypatch.setattr(monitoring, "_drift", lambda conn, client: bad)
+
+    with pytest.raises(Exception, match="monitor_drift"):
+        monitoring.refresh(warehouse, mlflow_client)

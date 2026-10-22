@@ -327,7 +327,8 @@ def test_the_models_a_dashboard_asks_the_registry_about_are_the_projects_models(
     asked = set()
     for panel in _panels(json.loads(path.read_text(encoding="utf-8"))):
         for target in panel["targets"]:
-            asked |= set(re.findall(r"name = '([^']+)'", target.get("rawSql", "")))
+            # a model name, not the end of another column's name (column_name = ...)
+            asked |= set(re.findall(r"(?<!\w)name = '([^']+)'", target.get("rawSql", "")))
 
     assert asked <= names, asked - names
 
@@ -339,3 +340,165 @@ def test_dashboards_ask_only_for_tables_the_login_may_read(path):
         for target in panel["targets"]:
             for table in re.findall(r"\bFROM\s+([a-z_.]+)", target.get("rawSql", ""), flags=re.I):
                 assert table in readable, (panel["title"], table)
+
+
+# --------------------------------------------------------------------------- alert rules
+
+ALERTING = GRAFANA / "provisioning" / "alerting"
+EXPECTED_RULES = {
+    "retail-drift-churn-probability",
+    "retail-drift-inputs",
+    "retail-model-not-promoted",
+    "retail-champion-old",
+    "retail-airflow-run-failed",
+    "retail-api-stale-churn-model",
+    "retail-api-stale-value-model",
+    "retail-api-down",
+    "retail-api-server-errors",
+}
+DATABASE_OF = {
+    "retail-warehouse": "warehouse_db",
+    "retail-airflow": "airflow",
+    "retail-mlflow": "mlflow",
+}
+
+
+def _rules():
+    document = yaml.safe_load((ALERTING / "rules.yml").read_text(encoding="utf-8"))
+    (group,) = document["groups"]
+    return group, {rule["uid"]: rule for rule in group["rules"]}
+
+
+def _queries(rule):
+    return [node for node in rule["data"] if node["datasourceUid"] != "__expr__"]
+
+
+def test_the_alert_rules_are_exactly_the_ones_decided_on():
+    _, rules = _rules()
+
+    assert set(rules) == EXPECTED_RULES
+
+
+def test_the_rules_are_evaluated_every_five_minutes_in_one_folder_nothing_is_sent_anywhere():
+    group, _ = _rules()
+
+    assert group["interval"] == "5m" and group["folder"] == "Retail retention alerts"
+    # no contact point or notification policy: an alert is visible in Grafana and goes nowhere
+    assert sorted(path.name for path in ALERTING.iterdir()) == ["rules.yml"]
+    text = (ALERTING / "rules.yml").read_text(encoding="utf-8")
+    assert "contactPoints" not in text and "notification_settings" not in text
+
+
+def test_every_rule_has_a_severity_a_summary_and_says_what_to_do():
+    _, rules = _rules()
+
+    for uid, rule in rules.items():
+        assert rule["labels"]["severity"] in {"alert", "warning"}, uid
+        assert (
+            rule["annotations"]["summary"].strip() and len(rule["annotations"]["description"]) > 40
+        ), uid
+        assert rule["title"].strip(), uid
+
+
+def test_a_rule_that_cannot_be_evaluated_is_reported_never_hidden():
+    _, rules = _rules()
+
+    assert {rule["execErrState"] for rule in rules.values()} == {"Error"}
+
+
+def test_a_rule_whose_data_is_missing_is_normal_except_for_the_api_being_down():
+    _, rules = _rules()
+
+    for uid, rule in rules.items():
+        expected = "Alerting" if uid == "retail-api-down" else "OK"
+        assert rule["noDataState"] == expected, uid
+
+
+def test_the_api_down_rule_waits_two_minutes_and_the_stale_model_rules_fifteen():
+    _, rules = _rules()
+
+    assert rules["retail-api-down"]["for"] == "2m"
+    assert rules["retail-api-stale-churn-model"]["for"] == "15m"
+    assert rules["retail-api-stale-value-model"]["for"] == "15m"
+
+
+def test_each_rules_condition_is_its_last_step_and_every_step_refers_to_one_that_exists():
+    _, rules = _rules()
+
+    for uid, rule in rules.items():
+        refs = [node["refId"] for node in rule["data"]]
+        assert len(refs) == len(set(refs)), uid
+        assert rule["condition"] == refs[-1], uid
+        for node in rule["data"]:
+            expression = node["model"].get("expression", "")
+            for used in re.findall(r"\b([A-Z])\b", expression):
+                assert used in refs, (uid, node["refId"], used)
+
+
+def test_rules_use_only_data_sources_that_exist():
+    _, rules = _rules()
+    known = {source["uid"] for source in _datasources()} | {"__expr__"}
+
+    for uid, rule in rules.items():
+        assert {node["datasourceUid"] for node in rule["data"]} <= known, uid
+
+
+def test_rules_read_only_what_the_login_may_read_and_never_a_column_kept_from_it():
+    _, rules = _rules()
+    readable = {(db, table) for db, table, _ in _wanted()}
+
+    for uid, rule in rules.items():
+        for node in _queries(rule):
+            sql = node["model"].get("rawSql")
+            if not sql:
+                continue
+            database = DATABASE_OF[node["datasourceUid"]]
+            tables = re.findall(r"\b(?:FROM|JOIN)\s+([a-z_][a-z_.]*)\b(?!\s*\()", sql, flags=re.I)
+            assert tables, (uid, sql)
+            for table in tables:
+                assert (database, table) in readable, (uid, database, table)
+            words = set(re.findall(r"[a-z_]+", sql.lower()))
+            assert not words & _NEVER_GRANTED.get(database, set()), uid
+
+
+def test_every_metric_a_rule_queries_exists_in_the_api_and_the_job_is_the_one_prometheus_scrapes():
+    _, rules = _rules()
+    exposed = set()
+    for family in metrics.ApiMetrics().registry.collect():
+        exposed |= {sample.name for sample in family.samples} | {family.name}
+        exposed |= {f"{family.name}{suffix}" for suffix in ("_total", "_bucket", "_count", "_sum")}
+    job = yaml.safe_load(
+        (ROOT / "services" / "prometheus" / "prometheus.yml").read_text(encoding="utf-8")
+    )
+    jobs = {j["job_name"] for j in job["scrape_configs"]}
+    queried = set()
+
+    for rule in rules.values():
+        for node in _queries(rule):
+            expression = node["model"].get("expr", "")
+            queried |= set(re.findall(r"\bretail_api_[a-z_]+", expression))
+            for scraped in re.findall(r'job="([^"]+)"', expression):
+                assert scraped in jobs, scraped
+
+    assert queried and queried <= exposed, queried - exposed
+
+
+def test_the_drift_rules_ask_the_tables_own_status_so_the_threshold_lives_in_one_place():
+    _, rules = _rules()
+
+    for uid in ("retail-drift-churn-probability", "retail-drift-inputs"):
+        sql = " ".join(node["model"].get("rawSql", "") for node in _queries(rules[uid]))
+        assert "status" in sql and "'alert'" in sql, uid
+        assert "0.25" not in sql and "0.1" not in sql, uid  # no second copy of the threshold
+
+
+def test_the_models_a_rule_asks_the_registry_about_are_the_projects_models():
+    _, rules = _rules()
+    names = {config.CHURN_MODEL_NAME, config.VALUE_MODEL_NAME, config.SEGMENT_MODEL_NAME}
+    asked = set()
+
+    for rule in rules.values():
+        for node in _queries(rule):
+            asked |= set(re.findall(r"(?<!\w)name = '([^']+)'", node["model"].get("rawSql", "")))
+
+    assert asked and asked <= names, asked - names
