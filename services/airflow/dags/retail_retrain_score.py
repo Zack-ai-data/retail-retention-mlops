@@ -1,7 +1,7 @@
 """Retrain the models, say what the promotion gate decided, then score and plan outreach.
 
     train  ->  report_promotion
-           ->  score  ->  plan
+           ->  score  ->  plan  ->  monitor
 
 Starts by itself when retail_etl has refreshed customer_snapshots (an Asset), or by hand.
 
@@ -16,6 +16,12 @@ cannot be read (a version with no recorded decision) fails the task.
 
 score and plan are retried once: each writes its results in a single transaction, so a failed
 attempt leaves nothing behind. Every successful plan run adds a new row to ml.outreach_plans.
+
+monitor refreshes the aggregate tables the Grafana dashboards read (ml.monitor_*): per-snapshot
+churn rate and spend, the score distribution of each run, segment sizes, every model version with
+the gate's decision and its metrics, and the churn model's backtest. It replaces them in one
+transaction, so a failed refresh leaves the dashboards showing the previous state; the task goes
+red so that it is noticed.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -65,5 +71,13 @@ with DAG(
         execution_timeout=timedelta(minutes=10),
     )
 
+    monitor = stage(
+        "monitor",
+        "monitor",
+        retries=1,
+        retry_delay=timedelta(minutes=1),
+        execution_timeout=timedelta(minutes=10),
+    )
+
     train >> [report_promotion, score]
-    score >> plan
+    score >> plan >> monitor

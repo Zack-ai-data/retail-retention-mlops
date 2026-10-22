@@ -1,0 +1,766 @@
+{
+  "uid": "retail-models",
+  "title": "Models",
+  "description": "Every model version, what the promotion gate decided, and how the models compare with simple baselines.",
+  "tags": [
+    "retail-retention",
+    "mlflow",
+    "models"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "5m",
+  "time": {
+    "from": "2010-01-01T00:00:00.000Z",
+    "to": "2012-02-01T00:00:00.000Z"
+  },
+  "timezone": "utc",
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Model versions and what the gate decided",
+      "description": "Every registered version of the project's models, newest first. The promotion gate decides whether a new version replaces the champion; a rejection is a normal result, and the previous champion keeps serving. The decision is written as text as well as coloured.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "retail-warehouse"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "retail-warehouse"
+          },
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT model_name AS model, version, created_at AS created, decision, is_champion AS champion, left(reason, 220) AS reason FROM ml.monitor_model_versions ORDER BY model_name, version DESC"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "decision"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "promoted": {
+                        "text": "promoted",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "rejected": {
+                        "text": "rejected",
+                        "color": "red",
+                        "index": 1
+                      },
+                      "unrecorded": {
+                        "text": "unrecorded",
+                        "color": "orange",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "champion"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "true": {
+                        "text": "champion",
+                        "color": "blue",
+                        "index": 0
+                      },
+                      "false": {
+                        "text": "",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "version"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reason"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 560
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "type": "barchart",
+      "title": "Churn model: precision-recall AUC on the test snapshot, by version",
+      "description": "Higher is better. The model against two simple baselines (customers ranked by how long since they last bought, and a statistical buy-till-you-die model). The promotion gate needs the model's lead over the recency baseline to be statistically clear, not just positive. Versions that were not evaluated against a baseline with a confidence interval are left out: their numbers were measured differently and would not compare.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "retail-warehouse"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "retail-warehouse"
+          },
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT version::text AS version, max(value) FILTER (WHERE metric = 'test_pr_auc') AS \"model\", max(value) FILTER (WHERE metric = 'baseline_recency_test_pr_auc') AS \"recency baseline\", max(value) FILTER (WHERE metric = 'baseline_bgnbd_test_pr_auc') AS \"BG/NBD baseline\" FROM ml.monitor_model_metrics WHERE model_name = 'retail-churn-classifier' GROUP BY version HAVING max(value) FILTER (WHERE metric = 'test_pr_auc_vs_recency_gain') IS NOT NULL ORDER BY version"
+        }
+      ],
+      "options": {
+        "orientation": "auto",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "barWidth": 0.8,
+        "groupWidth": 0.75,
+        "showValue": "auto",
+        "stacking": "none",
+        "xTickLabelRotation": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3B82F6"
+          },
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "gradientMode": "none"
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3B82F6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "recency baseline"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#6B7280"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "BG/NBD baseline"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8B5CF6"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Gain over the recency baseline, by backtest origin (champion)",
+      "description": "How much better the champion churn model ranks than the recency baseline at each time origin (precision-recall AUC difference), with its 95% interval. Above the zero line means better. The origins are dates in the dataset, not today's date.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "retail-warehouse"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "retail-warehouse"
+          },
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT origin::timestamp AS time, gain AS \"gain\", gain_ci_low AS \"95% interval, low\", gain_ci_high AS \"95% interval, high\" FROM ml.monitor_backtest WHERE version = (SELECT version FROM ml.monitor_model_versions WHERE model_name = 'retail-churn-classifier' AND is_champion) ORDER BY origin"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 7,
+            "spanNulls": true,
+            "axisSoftMin": 0,
+            "axisPlacement": "auto"
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gain"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3B82F6"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "95% interval, low"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#6B7280"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    6
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "95% interval, high"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#6B7280"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    6
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "type": "barchart",
+      "title": "Churn model: calibration error, by version",
+      "description": "Expected calibration error on the test snapshot: how far the predicted probabilities are from the observed rates. Lower is better, and the ranking multiplies the probability, so it matters. Versions that were not evaluated against a baseline with a confidence interval are left out: their numbers were measured differently and would not compare.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "retail-warehouse"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "retail-warehouse"
+          },
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT version::text AS version, max(value) FILTER (WHERE metric = 'test_ece') AS \"calibration error\" FROM ml.monitor_model_metrics WHERE model_name = 'retail-churn-classifier' GROUP BY version HAVING max(value) FILTER (WHERE metric = 'test_pr_auc_vs_recency_gain') IS NOT NULL ORDER BY version"
+        }
+      ],
+      "options": {
+        "orientation": "auto",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "barWidth": 0.8,
+        "groupWidth": 0.75,
+        "showValue": "auto",
+        "stacking": "none",
+        "xTickLabelRotation": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3B82F6"
+          },
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "gradientMode": "none"
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "calibration error"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3B82F6"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "type": "barchart",
+      "title": "Value model: rank correlation with real spend, by version",
+      "description": "Spearman correlation between predicted and actual 90-day spend on the test snapshot (higher is better), against the naive forecast of repeating last quarter's spend. Versions that were not evaluated against a baseline with a confidence interval are left out: their numbers were measured differently and would not compare.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "retail-warehouse"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "retail-warehouse"
+          },
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT version::text AS version, max(value) FILTER (WHERE metric = 'test_spearman') AS \"model\", max(value) FILTER (WHERE metric = 'baseline_naive_test_spearman') AS \"naive forecast\" FROM ml.monitor_model_metrics WHERE model_name = 'retail-value-regressor' GROUP BY version HAVING max(value) FILTER (WHERE metric = 'test_spearman_vs_naive_gain') IS NOT NULL ORDER BY version"
+        }
+      ],
+      "options": {
+        "orientation": "auto",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "barWidth": 0.8,
+        "groupWidth": 0.75,
+        "showValue": "auto",
+        "stacking": "none",
+        "xTickLabelRotation": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3B82F6"
+          },
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "gradientMode": "none"
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3B82F6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "naive forecast"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#6B7280"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "type": "barchart",
+      "title": "Value model: total bias, by version",
+      "description": "Predicted total spend against actual, in percent (0 is unbiased). The promotion gate requires the absolute bias to be at most 40%. The test snapshot follows the holiday peak, so every forecast from a year of earlier data runs low. Versions that were not evaluated against a baseline with a confidence interval are left out: their numbers were measured differently and would not compare.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "retail-warehouse"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "retail-warehouse"
+          },
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT version::text AS version, max(value) FILTER (WHERE metric = 'test_bias_pct') AS \"model\", max(value) FILTER (WHERE metric = 'baseline_naive_test_bias_pct') AS \"naive forecast\", max(value) FILTER (WHERE metric = 'single_stage_test_bias_pct') AS \"single-stage model\" FROM ml.monitor_model_metrics WHERE model_name = 'retail-value-regressor' GROUP BY version HAVING max(value) FILTER (WHERE metric = 'test_spearman_vs_naive_gain') IS NOT NULL ORDER BY version"
+        }
+      ],
+      "options": {
+        "orientation": "auto",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "barWidth": 0.8,
+        "groupWidth": 0.75,
+        "showValue": "auto",
+        "stacking": "none",
+        "xTickLabelRotation": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3B82F6"
+          },
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "gradientMode": "none"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3B82F6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "naive forecast"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#6B7280"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "single-stage model"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8B5CF6"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "type": "barchart",
+      "title": "Segmentation: silhouette score, by version",
+      "description": "How well separated the RFM customer segments are (higher is better, 1 is perfect). Customer segmentation is unsupervised, so the newest version is always the live one.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "retail-warehouse"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "retail-warehouse"
+          },
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT version::text AS version, max(value) FILTER (WHERE metric = 'silhouette') AS \"silhouette\" FROM ml.monitor_model_metrics WHERE model_name = 'retail-rfm-segments' GROUP BY version ORDER BY version"
+        }
+      ],
+      "options": {
+        "orientation": "auto",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "barWidth": 0.8,
+        "groupWidth": 0.75,
+        "showValue": "auto",
+        "stacking": "none",
+        "xTickLabelRotation": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3B82F6"
+          },
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "gradientMode": "none"
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "silhouette"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3B82F6"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

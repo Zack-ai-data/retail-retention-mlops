@@ -213,11 +213,11 @@ def test_report_fails_with_exit_1_when_the_registry_cannot_be_trusted(monkeypatc
 
 def test_report_is_not_part_of_running_every_stage(monkeypatch):
     calls = []
-    for stage in ("load_raw", "transform", "train", "score"):
+    for stage in ("load_raw", "transform", "train", "score", "monitor"):
         monkeypatch.setattr(main, stage, lambda stage=stage: calls.append(stage))
     monkeypatch.setattr(main, "plan", lambda *a: calls.append("plan"))
     monkeypatch.setattr(main, "report_promotions", lambda: calls.append("report") or 0)
 
     assert main.main(["--stage", "all"]) == 0
 
-    assert calls == ["load_raw", "transform", "train", "score", "plan"]
+    assert calls == ["load_raw", "transform", "train", "score", "plan", "monitor"]
