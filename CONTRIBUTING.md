@@ -104,6 +104,7 @@ docker compose up -d api dashboard            # the API (:8000) and the dashboar
 docker compose run --rm dashboard-tests       # the dashboard's own tests (they need Streamlit)
 docker compose --profile airflow up -d airflow-apiserver airflow-scheduler airflow-dag-processor airflow-worker airflow-triggerer   # Airflow, http://localhost:8080
 docker compose --profile airflow exec airflow-scheduler airflow dags trigger retail_etl   # run the ETL DAG (about 2.5 minutes)
+docker compose --profile airflow exec airflow-scheduler airflow dags trigger retail_retrain_score   # retrain, report, score, plan (about 3 minutes; it also starts after retail_etl succeeds)
 docker compose --profile airflow stop         # stop Airflow (its data is kept)
 ```
 

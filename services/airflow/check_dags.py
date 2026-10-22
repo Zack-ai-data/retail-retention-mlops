@@ -22,7 +22,7 @@ sys.path.insert(0, DAGS_FOLDER)
 
 from airflow.dag_processing.dagbag import DagBag  # noqa: E402  (after the setting above)
 
-EXPECTED = {"pipeline_healthcheck", "retail_etl"}
+EXPECTED = {"pipeline_healthcheck", "retail_etl", "retail_retrain_score"}
 
 bag = DagBag(DAGS_FOLDER)
 

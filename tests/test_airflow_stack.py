@@ -337,7 +337,7 @@ def test_every_stage_task_starts_from_the_pipeline_python_not_airflows_own():
 def test_dag_modules_import_only_airflow_the_standard_library_and_each_other():
     sibling_modules = {path.stem for path in DAGS.glob("*.py")}
 
-    for source in (COMMON_SOURCE, ETL_SOURCE):
+    for source in (COMMON_SOURCE, ETL_SOURCE, RETRAIN_SOURCE):
         assert _imported_modules(source) <= {"airflow", "datetime"} | sibling_modules
 
 
@@ -379,6 +379,64 @@ def test_the_dag_check_script_lists_exactly_the_dags_in_the_folder():
     )
 
     assert expected == dag_ids
+
+
+# ---------------------------------------------------- the retraining and scoring DAG
+
+RETRAIN_SOURCE = (DAGS / "retail_retrain_score.py").read_text(encoding="utf-8")
+
+
+def _dependencies(source):
+    return re.findall(r"^    (.*>>.*)$", source, flags=re.MULTILINE)
+
+
+def test_the_retraining_dag_starts_when_the_feature_table_is_refreshed_or_by_hand():
+    assert 'dag_id="retail_retrain_score"' in RETRAIN_SOURCE
+    assert "schedule=[CUSTOMER_SNAPSHOTS]" in RETRAIN_SOURCE
+    assert "catchup=False" in RETRAIN_SOURCE
+    assert "max_active_runs=1" in RETRAIN_SOURCE
+
+
+def test_the_etl_dag_produces_the_asset_the_retraining_dag_waits_for():
+    assert "outlets=[CUSTOMER_SNAPSHOTS]" in ETL_SOURCE
+    assert "schedule=[CUSTOMER_SNAPSHOTS]" in RETRAIN_SOURCE
+    assert COMMON_SOURCE.count("Asset(") == 1  # one definition, so the two cannot name it apart
+
+
+def test_the_stages_run_in_order_and_the_report_does_not_hold_up_scoring():
+    assert _dependencies(RETRAIN_SOURCE) == [
+        "train >> [report_promotion, score]",
+        "score >> plan",
+    ]
+
+
+def test_each_task_runs_the_stage_its_name_says():
+    for task_id, name in [
+        ("train", "train"),
+        ("report_promotion", "report"),
+        ("score", "score"),
+        ("plan", "plan"),
+    ]:
+        assert f'"{task_id}",\n        "{name}",' in RETRAIN_SOURCE
+
+
+def test_a_rejected_model_ends_the_report_task_as_skipped_not_failed():
+    task = _task(RETRAIN_SOURCE, "report_promotion")
+    main_source = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
+
+    assert "skip_on_exit_code=PROMOTION_REJECTED_EXIT_CODE" in task
+    assert "retries=0" in task  # the same decision would be read again
+    dag_code = re.search(r"^PROMOTION_REJECTED_EXIT_CODE = (\d+)", COMMON_SOURCE, re.MULTILINE)
+    cli_code = re.search(r"^PROMOTION_REJECTED_EXIT_CODE = (\d+)", main_source, re.MULTILINE)
+    assert dag_code and cli_code and dag_code.group(1) == cli_code.group(1)
+
+
+def test_training_scoring_and_planning_are_retried_once_each_and_have_time_limits():
+    for task_id in ("train", "score", "plan"):
+        task = _task(RETRAIN_SOURCE, task_id)
+        assert "retries=1" in task, task_id
+        assert "retry_delay=" in task and "execution_timeout=" in task, task_id
+    assert "execution_timeout=" in _task(RETRAIN_SOURCE, "report_promotion")
 
 
 # ------------------------------------------------------------ the DAG check in CI
@@ -438,8 +496,8 @@ def test_the_dag_job_does_not_replace_the_required_checks():
     assert "airflow-dags" not in _ci_job("quality") + _ci_job("dashboard")
 
 
-def test_the_etl_dag_prints_no_secrets():
-    lowered = (COMMON_SOURCE + ETL_SOURCE).lower()
+def test_the_dags_print_no_secrets():
+    lowered = (COMMON_SOURCE + ETL_SOURCE + RETRAIN_SOURCE).lower()
 
     assert "password" not in lowered and "secret" not in lowered
     assert "os.environ" not in lowered and "printenv" not in lowered

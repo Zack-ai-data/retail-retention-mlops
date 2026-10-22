@@ -9,6 +9,9 @@ from src.errors import PipelineError
 
 log = logging.getLogger("pipeline")
 
+# Airflow's BashOperator marks a task skipped (not failed) when it exits with 99 by default
+PROMOTION_REJECTED_EXIT_CODE = 99
+
 
 def load_raw() -> None:
     """Reload raw.online_retail from the Excel file (full refresh, all-or-nothing)."""
@@ -87,19 +90,40 @@ def plan(outreach_size: int, holdout_fraction: float) -> None:
         optimizer.make_plan(conn, outreach_size, holdout_fraction)
 
 
+def report_promotions() -> int:
+    """Say, per model, whether the newest version was promoted. Returns the exit code.
+
+    Training succeeds when the gate rejects a model (the old champion keeps serving), so a
+    scheduler cannot see that from the train stage's exit status. This stage can: it exits with
+    PROMOTION_REJECTED_EXIT_CODE when any model was not promoted.
+    """
+    from src import promotion_status, tracking  # imported here: pulls in MLflow
+
+    outcomes = promotion_status.latest_outcomes(tracking.configure())
+    for outcome in outcomes:
+        log.info("%s", promotion_status.describe(outcome))
+    rejected = [outcome.model for outcome in outcomes if not outcome.promoted]
+    if rejected:
+        log.warning("Not promoted: %s. The previous champions keep serving.", ", ".join(rejected))
+        return PROMOTION_REJECTED_EXIT_CODE
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the requested stages. Returns the process exit code (0 success, 1 expected failure,
-    2 unexpected error)."""
+    2 unexpected error, 99 from the report stage when a model was not promoted)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--stage",
-        choices=["load", "transform", "train", "score", "plan", "all"],
+        choices=["load", "transform", "train", "score", "plan", "report", "all"],
         default="all",
         help=(
             "load: Excel -> raw; transform: raw -> staging -> marts; "
             "train: marts -> models in MLflow; score: live models -> ml.predictions; "
             "plan: scores -> who to contact, with a random holdout, in ml.outreach_*; "
-            "all: every stage in order (default)"
+            "report: say whether each model's newest version was promoted (exit "
+            f"{PROMOTION_REJECTED_EXIT_CODE} if any was not); not part of all; "
+            "all: load, transform, train, score and plan in order (default)"
         ),
     )
     parser.add_argument(
@@ -119,6 +143,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
+        if args.stage == "report":
+            return report_promotions()
         if args.stage in ("load", "all"):
             load_raw()
         if args.stage in ("transform", "all"):
