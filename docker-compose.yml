@@ -106,6 +106,10 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       MLFLOW_DB: mlflow
+      # The background job system (a job runner and several worker processes, about 230 MB each)
+      # serves features this project does not use: tracking, the registry and artifacts do not
+      # need it
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
     ports:
       - "127.0.0.1:${MLFLOW_PORT:-5000}:5000"
     volumes:

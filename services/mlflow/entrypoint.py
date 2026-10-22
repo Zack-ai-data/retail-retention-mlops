@@ -25,6 +25,10 @@ os.execvp(
         "0.0.0.0",
         "--port",
         "5000",
+        # One web worker is enough for a single-user local setup; the default of 4 held about
+        # 230 MB per worker
+        "--workers",
+        "1",
         "--backend-store-uri",
         backend_store_uri,
         # Clients upload artifacts through the server over HTTP, so no shared volume is needed
