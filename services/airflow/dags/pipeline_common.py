@@ -12,7 +12,12 @@ from airflow.sdk import Asset
 # The pipeline runs in its own environment, not in Airflow's
 PIPELINE = "cd $PIPELINE_HOME && $PIPELINE_PYTHON"
 
-STAGES = ("load", "transform", "train", "score", "plan")
+STAGES = ("load", "transform", "train", "score", "plan", "report")
+
+# What the report stage exits with when the promotion gate rejected a model (src/main.py has the
+# same number; a test checks they agree). Airflow shows a task that exits with it as skipped
+# (yellow), not failed, so a rejection is visible without being reported as an error.
+PROMOTION_REJECTED_EXIT_CODE = 99
 
 # The feature table the models are trained from. The ETL DAG reports that it has refreshed it, and
 # later DAGs can start when it has, instead of waiting for a clock.

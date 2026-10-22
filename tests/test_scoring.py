@@ -126,6 +126,62 @@ def test_missing_feature_columns_are_reported():
         scoring.score_features(pd.DataFrame({"recency_days": [1.0]}), stub_champions())
 
 
+# -------------------------------- after a partial promotion (churn promoted, value rejected)
+#
+# The value model carries its own copy of the churn model it was trained with. The gate decides
+# each model separately, so the live churn champion can be newer than the churn model inside the
+# live value model. These tests pin what that mix does to each stored column.
+
+
+class SlowerChurn:
+    """An older churn model than ChurnByRecency: P(churn) rises half as fast."""
+
+    def predict_proba(self, X):
+        p = (X["recency_days"] / 400).clip(0.01, 0.99).to_numpy()
+        return np.column_stack([1 - p, p])
+
+
+def partly_promoted_champions():
+    """Churn version 4 is live; the live value model (version 3) embeds an older churn model."""
+    old_value = hurdle.HurdleValueModel(SlowerChurn(), SpendByFrequency())
+    return scoring.Champions(ChurnByRecency(), old_value, "4", "3")
+
+
+def test_after_a_partial_promotion_p_churn_and_margin_at_risk_use_the_live_churn_champion():
+    frame = customers(recency_days=[100.0], frequency_365d=[5.0])
+
+    scores = scoring.score_features(frame, partly_promoted_champions())
+
+    # the live churn champion says 0.5 (100 / 200); the older embedded model would say 0.25
+    assert scores["p_churn"].iloc[0] == pytest.approx(0.5)
+    assert scores["margin_at_risk"].iloc[0] == pytest.approx(0.5 * 150.0 * config.MARGIN)
+
+
+def test_after_a_partial_promotion_expected_spend_still_uses_the_value_models_own_churn_model():
+    # A known limit, pinned so a change to it is deliberate: expected_spend (shown in the API and
+    # dashboard, never used to rank) is P(buy) x spend with P(buy) from the churn model inside the
+    # value model, so it no longer equals (1 - p_churn) x spend_if_retained.
+    frame = customers(recency_days=[100.0], frequency_365d=[5.0])
+
+    scores = scoring.score_features(frame, partly_promoted_champions())
+
+    assert scores["expected_spend"].iloc[0] == pytest.approx(0.75 * 150.0)  # embedded: 1 - 0.25
+    assert scores["expected_spend"].iloc[0] != pytest.approx(
+        (1 - scores["p_churn"].iloc[0]) * scores["spend_if_retained"].iloc[0]
+    )
+
+
+def test_a_scoring_run_after_a_partial_promotion_records_both_versions(scoring_db, monkeypatch):
+    monkeypatch.setattr(scoring, "load_champions", lambda client: partly_promoted_champions())
+
+    run = scoring.score_batch(scoring_db, client=None)
+
+    assert (run.churn_version, run.value_version) == ("4", "3")
+    assert _runs(scoring_db) == [
+        ("2011-12-10", "4", "3", config.MARGIN, config.CONTACT_COST_GBP, 2)
+    ]
+
+
 # ------------------------------------------------------------------ loading the models
 
 
