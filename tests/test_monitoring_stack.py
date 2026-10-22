@@ -11,12 +11,16 @@ import re
 import pytest
 import yaml
 
-from src import config, metrics
+from src import config, metrics, monitoring
 
 ROOT = config.PROJECT_ROOT
 COMPOSE = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-READONLY_SQL = (ROOT / "services" / "grafana" / "readonly_user.sql").read_text(encoding="utf-8")
-SQL_CODE = re.sub(r"--[^\n]*", "", READONLY_SQL)  # the statements, without the explanations
+DB_DIR = ROOT / "services" / "grafana" / "db"
+READONLY_SQL = (DB_DIR / "readonly_user.sql").read_text(encoding="utf-8")
+GRANT_SQL = (DB_DIR / "grant_wanted.sql").read_text(encoding="utf-8")
+# the statements, without the explanations
+SQL_CODE = re.sub(r"--[^\n]*", "", READONLY_SQL)
+GRANT_CODE = re.sub(r"--[^\n]*", "", GRANT_SQL)
 GRAFANA = ROOT / "services" / "grafana"
 DASHBOARDS = sorted((GRAFANA / "dashboards").glob("*.json"))
 MONITORING_SERVICES = ["prometheus", "grafana-db-init", "grafana"]
@@ -144,19 +148,23 @@ def test_prometheus_scrapes_the_api_where_it_serves_its_metrics():
 # ------------------------------------------------------------- the read-only database login
 
 
-def _grants():
-    """Every GRANT statement in the read-only script, with the database it applies to."""
+def _wanted():
+    """What readonly_user.sql lists for each database: (database, table, columns or None)."""
     database = None
-    grants = []
-    for statement in re.split(r";\s*\n", READONLY_SQL):
-        statement = re.sub(r"--[^\n]*", "", statement).strip()
-        connect = re.search(r"\\connect\s+(?::\"(\w+)\"|(\w+))", statement)
+    wanted = []
+    for line in SQL_CODE.splitlines():
+        connect = re.match(r"\\connect\s+(?::\"(\w+)\"|(\w+))", line.strip())
         if connect:
             database = connect.group(1) or connect.group(2)
-        grant = re.search(r"GRANT\b.*", statement, flags=re.S)
-        if grant:
-            grants.append((database, " ".join(grant.group(0).split())))
-    return grants
+        for table, columns in re.findall(r"\('([\w.]+)',\s*(NULL|'[^']*')\)", line):
+            wanted.append((database, table, None if columns == "NULL" else columns.strip("'")))
+    return wanted
+
+
+_MORE_THAN_READING = (
+    r"\b(ALL|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|CREATE|TEMP|EXECUTE)\b"
+    r"|GRANT OPTION"
+)
 
 
 def test_the_login_has_no_privileges_beyond_reading():
@@ -170,64 +178,67 @@ def test_the_login_has_no_privileges_beyond_reading():
     assert "CONNECTION LIMIT" in READONLY_SQL
 
 
-def test_only_select_and_usage_are_ever_granted():
-    grants = _grants()
-
-    assert grants
-    for _, grant in grants:
-        assert re.match(r"GRANT (SELECT|USAGE)\b", grant), grant
-        assert not re.search(_MORE_THAN_READING, grant), grant
+def test_every_privilege_is_granted_by_the_one_include_and_none_directly():
+    # the list of wanted tables is the whole story: there is no GRANT statement in this file
+    assert not re.search(r"\bGRANT\s+[A-Z]", SQL_CODE.upper())
+    assert SQL_CODE.count("\\ir grant_wanted.sql") == 3  # once per database
 
 
-_MORE_THAN_READING = (
-    r"\b(ALL|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|CREATE|TEMP|EXECUTE)\b"
-    r"|GRANT OPTION"
-)
+def test_the_include_can_grant_only_usage_on_a_schema_and_select():
+    statements = set(re.findall(r"'(GRANT [^']*)'", GRANT_CODE))
+
+    assert statements == {
+        "GRANT USAGE ON SCHEMA %I TO grafana_ro",
+        "GRANT SELECT %s ON %s TO grafana_ro",
+    }
+    for statement in statements:
+        assert not re.search(_MORE_THAN_READING, statement), statement
+
+
+def test_only_objects_that_exist_are_granted_and_the_rest_are_reported_not_errors():
+    # a new machine has no Airflow, MLflow or monitoring tables until those have run once
+    assert GRANT_CODE.count("to_regclass(tbl) IS NOT NULL") == 2
+    assert GRANT_CODE.count("to_regclass(tbl) IS NULL") == 1 and "skipped" in GRANT_CODE
 
 
 def test_nothing_is_granted_by_wildcard_or_by_default_for_future_tables():
-    assert "ALL TABLES" not in SQL_CODE.upper()
-    assert "ALTER DEFAULT PRIVILEGES" not in SQL_CODE.upper()
+    for code in (SQL_CODE, GRANT_CODE):
+        assert "ALL TABLES" not in code.upper()
+        assert "ALTER DEFAULT PRIVILEGES" not in code.upper()
 
 
 def test_in_airflow_and_mlflow_only_named_columns_are_granted():
-    for database, grant in _grants():
-        if database in ("airflow", "mlflow") and grant.startswith("GRANT SELECT"):
-            assert re.match(r"GRANT SELECT \([a-z_, ]+\) ON \w+ TO grafana_ro", grant), grant
+    restricted = [(db, table, cols) for db, table, cols in _wanted() if db in ("airflow", "mlflow")]
+
+    assert restricted
+    for _, table, columns in restricted:
+        assert columns and re.fullmatch(r"[a-z_]+(, [a-z_]+)*", columns), table
 
 
-@pytest.mark.parametrize(
-    "column",
-    [
-        "conf",
-        "executor_config",
-        "next_kwargs",
-        "hostname",
-        "pid",
-        "unixname",  # Airflow
-        "source",
-        "storage_location",
-        "run_id",
-        "user_id",
-        "description",
-        "run_link",  # MLflow
-    ],
-)
-def test_columns_that_hold_arguments_paths_or_hosts_are_never_granted(column):
-    for database, grant in _grants():
-        if database == "mlflow" and "model_versions" in grant and column == "run_id":
-            assert not re.search(rf"\b{column}\b", grant), grant
-        elif column not in ("run_id",):
-            assert not re.search(rf"\b{column}\b", grant), (column, grant)
+_NEVER_GRANTED = {
+    "airflow": {"conf", "executor_config", "next_kwargs", "hostname", "pid", "unixname"},
+    "mlflow": {"source", "storage_location", "run_id", "user_id", "description", "run_link"},
+}
 
 
-def test_the_warehouse_login_sees_scoring_runs_only_never_customer_level_data():
-    warehouse = [grant for database, grant in _grants() if database not in ("airflow", "mlflow")]
+@pytest.mark.parametrize("database", sorted(_NEVER_GRANTED))
+def test_columns_that_hold_arguments_paths_or_hosts_are_never_granted(database):
+    for db, table, columns in _wanted():
+        if db == database:
+            granted = set(columns.split(", "))
+            assert not granted & _NEVER_GRANTED[database], (
+                table,
+                granted & _NEVER_GRANTED[database],
+            )
 
-    assert sorted(warehouse) == [
-        "GRANT SELECT ON ml.scoring_runs TO grafana_ro",
-        "GRANT USAGE ON SCHEMA ml TO grafana_ro",
-    ]
+
+def test_the_warehouse_login_reads_exactly_the_tables_the_monitor_stage_writes():
+    warehouse = {table for db, table, _ in _wanted() if db not in ("airflow", "mlflow")}
+
+    # tied to the stage's own list, so a new monitoring table cannot be forgotten here, and
+    # nothing at customer level (predictions, snapshots, raw data) can be added by accident
+    assert warehouse == {"ml.scoring_runs", *monitoring.TABLES}
+    assert all(columns is None for db, _, columns in _wanted() if db not in ("airflow", "mlflow"))
 
 
 def test_the_password_comes_from_the_environment_and_the_script_can_be_run_again():
@@ -299,12 +310,14 @@ def test_every_metric_a_dashboard_queries_exists_in_the_api(path):
     for family in metrics.ApiMetrics().registry.collect():
         exposed |= {sample.name for sample in family.samples} | {family.name}
         exposed |= {f"{family.name}{suffix}" for suffix in ("_total", "_bucket", "_count", "_sum")}
-    queried = set()
+    queried, uses_prometheus = set(), False
     for panel in _panels(json.loads(path.read_text(encoding="utf-8"))):
         for target in panel["targets"]:
+            uses_prometheus |= target["datasource"]["uid"] == "retail-prometheus"
             queried |= set(re.findall(r"\bretail_api_[a-z_]+", target.get("expr", "")))
 
-    assert queried, "the dashboard queries none of the API's metrics"
+    if uses_prometheus:  # the dashboards that read Postgres have no metrics to check
+        assert queried, "the dashboard uses Prometheus but queries none of the API's metrics"
     assert queried <= exposed, queried - exposed
 
 
@@ -320,9 +333,9 @@ def test_the_models_a_dashboard_asks_the_registry_about_are_the_projects_models(
 
 
 @pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
-def test_dashboards_ask_only_for_tables_and_columns_the_login_may_read(path):
-    granted = " ".join(grant for _, grant in _grants())
+def test_dashboards_ask_only_for_tables_the_login_may_read(path):
+    readable = {table for _, table, _ in _wanted()}
     for panel in _panels(json.loads(path.read_text(encoding="utf-8"))):
         for target in panel["targets"]:
             for table in re.findall(r"\bFROM\s+([a-z_.]+)", target.get("rawSql", ""), flags=re.I):
-                assert re.search(rf"\bON {re.escape(table)}\b", granted), (panel["title"], table)
+                assert table in readable, (panel["title"], table)

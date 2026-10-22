@@ -3,7 +3,7 @@
 # the Grafana container's environment, which docker-compose.yml takes from .env.
 #
 # The three Postgres sources log in as grafana_ro, a read-only role limited to named tables and
-# columns (services/grafana/readonly_user.sql), never as the warehouse owner.
+# columns (services/grafana/db/readonly_user.sql), never as the warehouse owner.
 
 apiVersion: 1
 

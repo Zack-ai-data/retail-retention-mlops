@@ -406,7 +406,7 @@ def test_the_etl_dag_produces_the_asset_the_retraining_dag_waits_for():
 def test_the_stages_run_in_order_and_the_report_does_not_hold_up_scoring():
     assert _dependencies(RETRAIN_SOURCE) == [
         "train >> [report_promotion, score]",
-        "score >> plan",
+        "score >> plan >> monitor",
     ]
 
 
@@ -416,6 +416,7 @@ def test_each_task_runs_the_stage_its_name_says():
         ("report_promotion", "report"),
         ("score", "score"),
         ("plan", "plan"),
+        ("monitor", "monitor"),
     ]:
         assert f'"{task_id}",\n        "{name}",' in RETRAIN_SOURCE
 
@@ -431,8 +432,8 @@ def test_a_rejected_model_ends_the_report_task_as_skipped_not_failed():
     assert dag_code and cli_code and dag_code.group(1) == cli_code.group(1)
 
 
-def test_training_scoring_and_planning_are_retried_once_each_and_have_time_limits():
-    for task_id in ("train", "score", "plan"):
+def test_training_scoring_planning_and_monitoring_are_retried_once_each_with_time_limits():
+    for task_id in ("train", "score", "plan", "monitor"):
         task = _task(RETRAIN_SOURCE, task_id)
         assert "retries=1" in task, task_id
         assert "retry_delay=" in task and "execution_timeout=" in task, task_id

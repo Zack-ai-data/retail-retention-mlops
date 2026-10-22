@@ -90,6 +90,22 @@ def plan(outreach_size: int, holdout_fraction: float) -> None:
         optimizer.make_plan(conn, outreach_size, holdout_fraction)
 
 
+def monitor() -> None:
+    """Refresh the aggregate tables the monitoring dashboards read (ml.monitor_*)."""
+    from src import monitoring, tracking  # imported here: pulls in MLflow
+
+    with database.get_connection() as conn:
+        database.run_sql_dir(conn, config.SCHEMA_DIR)  # makes sure the monitoring tables exist
+        database.require_rows(
+            conn,
+            "marts.customer_snapshots",
+            "Run the transform stage first: python -m src.main --stage transform",
+        )
+        counts = monitoring.refresh(conn, tracking.configure())
+    for table, rows in counts.items():
+        log.info("%s now holds %s rows", table, f"{rows:,}")
+
+
 def report_promotions() -> int:
     """Say, per model, whether the newest version was promoted. Returns the exit code.
 
@@ -115,15 +131,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--stage",
-        choices=["load", "transform", "train", "score", "plan", "report", "all"],
+        choices=["load", "transform", "train", "score", "plan", "monitor", "report", "all"],
         default="all",
         help=(
             "load: Excel -> raw; transform: raw -> staging -> marts; "
             "train: marts -> models in MLflow; score: live models -> ml.predictions; "
             "plan: scores -> who to contact, with a random holdout, in ml.outreach_*; "
+            "monitor: refresh the aggregate tables the monitoring dashboards read (ml.monitor_*); "
             "report: say whether each model's newest version was promoted (exit "
             f"{PROMOTION_REJECTED_EXIT_CODE} if any was not); not part of all; "
-            "all: load, transform, train, score and plan in order (default)"
+            "all: load, transform, train, score, plan and monitor in order (default)"
         ),
     )
     parser.add_argument(
@@ -155,6 +172,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             score()
         if args.stage in ("plan", "all"):
             plan(args.outreach_size, args.holdout_fraction)
+        if args.stage in ("monitor", "all"):
+            monitor()
     except PipelineError as exc:
         log.error("%s", exc)  # an explained, fixable failure: message only, no traceback
         return 1

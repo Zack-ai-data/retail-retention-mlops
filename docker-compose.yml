@@ -401,13 +401,13 @@ services:
       GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-}
       WAREHOUSE_DB: ${POSTGRES_DB}
     volumes:
-      - ./services/grafana/readonly_user.sql:/readonly_user.sql:ro
+      - ./services/grafana/db:/db:ro
     entrypoint:
       - sh
       - -c
       - |
         [ -n "$$GRAFANA_DB_PASSWORD" ] || { echo "GRAFANA_DB_PASSWORD is empty: set it in .env (see .env.example)" >&2; exit 1; }
-        exec psql -v ON_ERROR_STOP=1 -d postgres -f /readonly_user.sql
+        exec psql -v ON_ERROR_STOP=1 -d postgres -f /db/readonly_user.sql
     restart: "no"
 
   grafana:

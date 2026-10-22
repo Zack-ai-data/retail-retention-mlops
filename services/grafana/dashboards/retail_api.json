@@ -337,7 +337,7 @@
             "type": "prometheus",
             "uid": "retail-prometheus"
           },
-          "expr": "sum(retail_api_model_loads_total{result=\"failed\"})",
+          "expr": "sum(retail_api_model_loads_total{result=\"failed\"}) or vector(0)",
           "legendFormat": "",
           "refId": "A",
           "instant": true,

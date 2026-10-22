@@ -12,7 +12,7 @@ from airflow.sdk import Asset
 # The pipeline runs in its own environment, not in Airflow's
 PIPELINE = "cd $PIPELINE_HOME && $PIPELINE_PYTHON"
 
-STAGES = ("load", "transform", "train", "score", "plan", "report")
+STAGES = ("load", "transform", "train", "score", "plan", "monitor", "report")
 
 # What the report stage exits with when the promotion gate rejected a model (src/main.py has the
 # same number; a test checks they agree). Airflow shows a task that exits with it as skipped

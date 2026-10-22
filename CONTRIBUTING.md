@@ -108,6 +108,9 @@ docker compose --profile airflow exec airflow-scheduler airflow dags trigger ret
 docker compose --profile airflow stop         # stop Airflow (its data is kept)
 docker compose --profile monitoring up -d     # Prometheus (:9090) and Grafana (:3000); start the API too so it is scraped
 docker compose stop grafana prometheus        # stop only monitoring (`--profile monitoring stop` also stops Postgres and MLflow)
+docker compose restart grafana                # after editing a dashboard or provisioning file (Grafana does not notice edits while running)
+docker compose --profile monitoring up grafana-db-init   # re-run the read-only login's grants (after Airflow, MLflow or the pipeline first create their tables)
+docker compose run --rm app python -m src.main --stage monitor   # refresh the tables the dashboards read
 ```
 
 The `app` image is the runtime image: runtime libraries only, no tests or dev tools, and it runs as a non-root user. The tests and dev tools live in the `quality` image. The `app` image holds a copy of the code from when it was built, so rebuild it (`docker compose build app`) after changing code, or the pipeline runs the old version.
