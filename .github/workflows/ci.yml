@@ -14,19 +14,36 @@
 #
 # The last two do not run on pull requests, so they cannot be required checks. A red run on main
 # means a change got through that the fast tests could not catch: fix it with a new pull request.
+#
+# Weekly: every job above also runs on a schedule, Mondays at 02:00 UTC (10:00 in Malaysia). Nothing
+# in the repository has to change for it to go red. What it can catch is what is NOT pinned: the
+# Docker images (python, postgres, the Airflow tag), the runner image and the actions move on their
+# own, while the Python libraries are locked by hash and cannot. It is a reproducibility check, not
+# retraining: the dataset is static, so the results should come out the same every week. Know that:
+#   * it runs on GitHub's machines with their own throwaway Postgres and MLflow (never your laptop's
+#     stack), and nothing it produces outlives the run;
+#   * GitHub switches scheduled workflows off after 60 days with no activity in the repository (re-
+#     enable under Actions), and may start a run several minutes late;
+#   * it is free because this repository is public, and it uses no secret;
+#   * a failed run emails whoever last changed the schedule line, if their GitHub notification
+#     settings allow it (Settings > Notifications > Actions).
 name: CI
 
 on:
   push:
     branches: [main, master]
   pull_request:
+  schedule:
+    - cron: "0 2 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# One run at a time per kind of trigger and branch, and a newer run cancels an older one. The kind
+# is part of the name so a push to main cannot cancel the weekly run (both use the main branch).
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
