@@ -36,6 +36,7 @@ INSERT INTO wanted VALUES
     ('ml.monitor_snapshot_summary', NULL),
     ('ml.monitor_score_distribution', NULL),
     ('ml.monitor_segment_sizes', NULL),
+    ('ml.monitor_drift', NULL),
     ('ml.monitor_model_versions', NULL),
     ('ml.monitor_model_metrics', NULL),
     ('ml.monitor_backtest', NULL);

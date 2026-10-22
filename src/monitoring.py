@@ -9,6 +9,9 @@ never needs access to a row about a customer.
                        ml.monitor_score_distribution how the churn probabilities of each scoring
                                                     run are spread
                        ml.monitor_segment_sizes      customers per segment
+                       ml.monitor_drift              how far each model input, and the churn
+                                                    probability, has moved from the same time of
+                                                    year a year earlier
   from MLflow          ml.monitor_model_versions     every version of the project's models and
                                                     what the promotion gate decided
                        ml.monitor_model_metrics      every metric logged for those versions
@@ -26,6 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import psycopg
 from mlflow import MlflowClient
@@ -33,7 +37,8 @@ from mlflow.entities.model_registry import ModelVersion
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, ErrorCode
 
-from src import config, database, promotion_status, tracking
+from src import config, database, features, promotion_status, scoring, tracking
+from src.errors import RegistryError
 
 log = logging.getLogger(__name__)
 
@@ -54,11 +59,35 @@ VERSION_COLUMNS = ["model_name", "version", "created_at", "decision", "reason", 
 METRIC_COLUMNS = ["model_name", "version", "metric", "value"]
 MAX_REASON_CHARS = 600  # a decision's reason lists every check; the start says what mattered
 
+# Drift is measured with the population stability index (PSI) against the same time of year, a
+# year earlier, so the seasons (the churn rate alone swings from 39% to 65%) are not mistaken for
+# drift. The thresholds are the usual convention: below 0.1 stable, 0.1 to 0.25 some shift, 0.25
+# and above a large shift. They were not fitted to this data. On the real data the newest
+# same-season comparison (December 2010 to December 2011) has no column at or above 0.1.
+PSI_WARN = 0.1
+PSI_ALERT = 0.25
+DRIFT_BINS = 10
+DRIFT_MIN_CUSTOMERS = 50  # a distribution of fewer customers than this says too little
+# A snapshot about a year earlier. Snapshots are 90 days apart, so 364 days is the usual gap.
+REFERENCE_GAP_DAYS = (350, 380)
+REFERENCE_GAP_TARGET = 364
+# Model inputs that are not about customers: the three calendar columns hold one value for the
+# whole snapshot (so they always look drifted), and tenure grows with how long the dataset has
+# existed: December 2011 customers can have two years of history, December 2010 ones at most one.
+DRIFT_EXCLUDED = frozenset(
+    {"season_sin", "season_cos", "history_days_available", "tenure_days_capped"}
+)
+DRIFT_COLUMNS = [c for c in features.FEATURE_COLUMNS if c not in DRIFT_EXCLUDED]
+CHURN_PROBABILITY = "p_churn"
+DRIFT_TABLE_COLUMNS = ["snapshot_date", "reference_date", "column_name", "psi", "status"]
+_EPSILON = 1e-4  # a bin with no customers counts as this share, so the log is defined
+
 # Every table, in the order they are replaced
 TABLES = [
     "ml.monitor_snapshot_summary",
     "ml.monitor_score_distribution",
     "ml.monitor_segment_sizes",
+    "ml.monitor_drift",
     "ml.monitor_model_versions",
     "ml.monitor_model_metrics",
     "ml.monitor_backtest",
@@ -204,6 +233,101 @@ def backtest_table(client: MlflowClient) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)[BACKTEST_COLUMNS]
 
 
+def psi(reference: pd.Series, new: pd.Series) -> float | None:
+    """The population stability index of new against reference.
+
+    sum over bins of (share_new - share_reference) * ln(share_new / share_reference). The bins are
+    the reference's deciles, so each holds about a tenth of it; a column with only a few distinct
+    values gets one bin per value, plus one for any value the reference never had. Missing values
+    are a bin of their own: a column that starts going missing has drifted. None when either side
+    has too few customers to say anything.
+    """
+    ref_all = reference.to_numpy(dtype=float)
+    new_all = new.to_numpy(dtype=float)
+    if len(ref_all) < DRIFT_MIN_CUSTOMERS or len(new_all) < DRIFT_MIN_CUSTOMERS:
+        return None
+    ref, cur = ref_all[~np.isnan(ref_all)], new_all[~np.isnan(new_all)]
+    if len(ref) == 0:
+        return None
+    values = np.unique(ref)
+    if len(values) <= DRIFT_BINS:  # few distinct values: one bin per value, and "anything else"
+        # (decile edges would be interpolated between the values, and a value the reference
+        # never had would land in a bin that already holds another)
+        ref_counts = np.array([(ref == v).sum() for v in values] + [0])
+        new_counts = np.array([(cur == v).sum() for v in values] + [(~np.isin(cur, values)).sum()])
+    else:
+        edges = np.unique(np.quantile(ref, np.linspace(0, 1, DRIFT_BINS + 1)))
+        edges[0], edges[-1] = -np.inf, np.inf
+        ref_counts, new_counts = np.histogram(ref, edges)[0], np.histogram(cur, edges)[0]
+    ref_share = np.append(ref_counts, np.isnan(ref_all).sum()) / len(ref_all)
+    new_share = np.append(new_counts, np.isnan(new_all).sum()) / len(new_all)
+    ref_share, new_share = np.clip(ref_share, _EPSILON, None), np.clip(new_share, _EPSILON, None)
+    return float(np.sum((new_share - ref_share) * np.log(new_share / ref_share)))
+
+
+def drift_status(value: float) -> str:
+    """ok below PSI_WARN, warn from PSI_WARN, alert from PSI_ALERT."""
+    if value >= PSI_ALERT:
+        return "alert"
+    if value >= PSI_WARN:
+        return "warn"
+    return "ok"
+
+
+def reference_snapshot(later: Any, dates: list[Any]) -> Any | None:
+    """The snapshot about a year before `later` (closest to 364 days), or None if there is none."""
+    gaps = {d: (later - d).days for d in dates}
+    candidates = [
+        d for d, gap in gaps.items() if REFERENCE_GAP_DAYS[0] <= gap <= REFERENCE_GAP_DAYS[1]
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda d: abs(gaps[d] - REFERENCE_GAP_TARGET))
+
+
+def drift_table(snapshots: pd.DataFrame, churn_model: Any | None = None) -> pd.DataFrame:
+    """PSI of every model input, and of the churn probability, for each snapshot that has a
+    snapshot a year earlier to compare with. Only the customers the models score are compared.
+
+    Customer rows are used here, in memory, and only one number per column leaves: the table has
+    no customer in it. churn_model is the live champion; without one the churn probability is
+    left out.
+    """
+    population = snapshots[snapshots["is_actionable"]].reset_index(drop=True)
+    inputs = features.prepare_features(population)
+    columns = list(DRIFT_COLUMNS)
+    if churn_model is not None:
+        inputs[CHURN_PROBABILITY] = churn_model.predict_proba(inputs[features.FEATURE_COLUMNS])[
+            :, 1
+        ]
+        columns.append(CHURN_PROBABILITY)
+    snapshot_of = population["snapshot_date"].to_numpy()
+    dates = sorted(set(snapshot_of))
+    rows = []
+    for later in dates:
+        earlier = reference_snapshot(later, dates)
+        if earlier is None:
+            continue
+        for column in columns:
+            value = psi(
+                inputs.loc[snapshot_of == earlier, column], inputs.loc[snapshot_of == later, column]
+            )
+            if value is not None:
+                rows.append((later, earlier, column, value, drift_status(value)))
+    return pd.DataFrame(rows, columns=DRIFT_TABLE_COLUMNS)
+
+
+def _drift(conn: psycopg.Connection[Any], client: MlflowClient) -> pd.DataFrame:
+    """The drift table from the warehouse and the live champion."""
+    snapshots = features.load_snapshots(conn)
+    try:
+        churn_model = scoring.load_champions(client).churn_model
+    except RegistryError as exc:  # no champion yet, or one that cannot score today's columns
+        log.warning("The churn probability drift is left out: %s", exc)
+        churn_model = None
+    return drift_table(snapshots, churn_model)
+
+
 def refresh(conn: psycopg.Connection[Any], client: MlflowClient) -> dict[str, int]:
     """Replace every monitoring table. Returns the number of rows each now holds.
 
@@ -213,6 +337,7 @@ def refresh(conn: psycopg.Connection[Any], client: MlflowClient) -> dict[str, in
     """
     versions, metrics = model_tables(client)
     backtest = backtest_table(client)
+    drift = _drift(conn, client)
 
     with conn.transaction():
         for table in reversed(TABLES):
@@ -220,6 +345,7 @@ def refresh(conn: psycopg.Connection[Any], client: MlflowClient) -> dict[str, in
         conn.execute(_SNAPSHOT_SUMMARY)
         conn.execute(_SCORE_DISTRIBUTION)
         conn.execute(_SEGMENT_SIZES)
+        database.copy_dataframe(conn, drift, "ml.monitor_drift")
         database.copy_dataframe(conn, versions, "ml.monitor_model_versions")
         database.copy_dataframe(conn, metrics, "ml.monitor_model_metrics")
         database.copy_dataframe(conn, backtest, "ml.monitor_backtest")
