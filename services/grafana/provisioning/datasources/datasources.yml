@@ -1,0 +1,61 @@
+# Grafana's data sources, created from this file at start-up (nothing is configured by hand, so a
+# fresh start gives the same Grafana). No credential is written here: $VARIABLES are filled in from
+# the Grafana container's environment, which docker-compose.yml takes from .env.
+#
+# The three Postgres sources log in as grafana_ro, a read-only role limited to named tables and
+# columns (services/grafana/readonly_user.sql), never as the warehouse owner.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: retail-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+
+  - name: Warehouse
+    uid: retail-warehouse
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: grafana_ro
+    editable: false
+    jsonData:
+      database: $POSTGRES_DB
+      sslmode: disable
+      postgresVersion: 1600
+    secureJsonData:
+      password: $GRAFANA_DB_PASSWORD
+
+  - name: Airflow
+    uid: retail-airflow
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: grafana_ro
+    editable: false
+    jsonData:
+      database: airflow
+      sslmode: disable
+      postgresVersion: 1600
+    secureJsonData:
+      password: $GRAFANA_DB_PASSWORD
+
+  - name: MLflow
+    uid: retail-mlflow
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: grafana_ro
+    editable: false
+    jsonData:
+      database: mlflow
+      sslmode: disable
+      postgresVersion: 1600
+    secureJsonData:
+      password: $GRAFANA_DB_PASSWORD

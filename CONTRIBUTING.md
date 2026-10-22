@@ -106,6 +106,8 @@ docker compose --profile airflow up -d airflow-apiserver airflow-scheduler airfl
 docker compose --profile airflow exec airflow-scheduler airflow dags trigger retail_etl   # run the ETL DAG (about 2.5 minutes)
 docker compose --profile airflow exec airflow-scheduler airflow dags trigger retail_retrain_score   # retrain, report, score, plan (about 3 minutes; it also starts after retail_etl succeeds)
 docker compose --profile airflow stop         # stop Airflow (its data is kept)
+docker compose --profile monitoring up -d     # Prometheus (:9090) and Grafana (:3000); start the API too so it is scraped
+docker compose stop grafana prometheus        # stop only monitoring (`--profile monitoring stop` also stops Postgres and MLflow)
 ```
 
 The `app` image is the runtime image: runtime libraries only, no tests or dev tools, and it runs as a non-root user. The tests and dev tools live in the `quality` image. The `app` image holds a copy of the code from when it was built, so rebuild it (`docker compose build app`) after changing code, or the pipeline runs the old version.
