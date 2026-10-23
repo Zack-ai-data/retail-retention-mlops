@@ -1,0 +1,122 @@
+# Dependabot version updates: a weekly pull request when a GitHub Action or a Docker image has a
+# newer version. CI runs on every one of them and a pull request cannot merge unless it passes, so
+# an update that breaks something is caught before it reaches main.
+#
+# What is deliberately NOT here:
+#   * pip. The Python libraries are locked by hash (requirements.lock, requirements-dev.lock and the
+#     dashboard's two locks) and are regenerated on purpose with a documented command (see
+#     CONTRIBUTING.md), never by a bot.
+#   * Major versions of anything that holds state or configuration, because an update that looks
+#     like a version bump is really a migration:
+#       postgres   a major version cannot open the existing data volume without a migration;
+#       redis      the Airflow task queue;
+#       grafana    its provisioning files and alerting change between majors;
+#       prometheus the same, for its configuration;
+#       airflow    the DAG API and the database schema change between majors.
+#   * python (the base image). The lock files are hash-pinned wheels built for Python 3.12, so a
+#     different Python needs the locks regenerated first: a deliberate change, not an automatic one.
+#
+# Weekly on Tuesdays at 10:00 in Malaysia, the day after the weekly CI run on main (Mondays), so a
+# red Monday and a stack of update pull requests are never mixed together.
+#
+# GitHub reads this file from the default branch. A mistake in it shows under Insights >
+# Dependency graph > Dependabot, with a button to check for updates now.
+
+version: 2
+
+updates:
+  # The actions the workflows use (actions/checkout, setup-python, docker/*). Major releases are
+  # allowed: CI validates each pull request.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "10:00"
+      timezone: "Asia/Kuala_Lumpur"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # Base images in the Dockerfiles: the project's (api, pipeline and tests), the Airflow image, the
+  # dashboard and the MLflow server. One entry for each folder that has a Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "10:00"
+      timezone: "Asia/Kuala_Lumpur"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  - package-ecosystem: "docker"
+    directory: "/services/airflow"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "10:00"
+      timezone: "Asia/Kuala_Lumpur"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+    ignore:
+      - dependency-name: "apache/airflow"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "docker"
+    directory: "/services/dashboard"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "10:00"
+      timezone: "Asia/Kuala_Lumpur"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  - package-ecosystem: "docker"
+    directory: "/services/mlflow"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "10:00"
+      timezone: "Asia/Kuala_Lumpur"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  # The images docker-compose.yml starts without building them: Postgres, Redis, Prometheus and
+  # Grafana. Minor and patch updates only (see the top of this file for why).
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "10:00"
+      timezone: "Asia/Kuala_Lumpur"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+    ignore:
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "redis"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "prom/prometheus"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "grafana/grafana-oss"
+        update-types: ["version-update:semver-major"]
