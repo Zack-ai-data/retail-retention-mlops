@@ -364,7 +364,7 @@ services:
   # reads Postgres directly through a read-only role. Both are bound to localhost.
   # ------------------------------------------------------------------------------------------
   prometheus:
-    image: prom/prometheus:v3.14.0
+    image: prom/prometheus:v3.15.0
     container_name: retail-prometheus
     profiles: ["monitoring"]
     command:
