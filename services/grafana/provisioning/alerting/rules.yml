@@ -1,7 +1,7 @@
 # Alert rules, loaded by Grafana at start-up. Edit this file, then `docker compose restart grafana`.
 # They are evaluated every 5 minutes and their state is shown in
-# Grafana under Alerting > Alert rules. NOTHING IS SENT ANYWHERE: no contact point is configured
-# (that needs an email or chat account), so an alert is only visible in Grafana.
+# Grafana under Alerting > Alert rules. A firing rule is sent to Slack: where it goes is set in
+# contactpoints.yml and policies.yml next to this file, not here.
 #
 # Thresholds: drift uses the usual PSI convention (0.25 and above is a large shift); the 90 days for
 # an old champion and the 15 minutes before a stale API model is reported are assumptions.

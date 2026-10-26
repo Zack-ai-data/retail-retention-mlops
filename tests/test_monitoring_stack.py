@@ -379,12 +379,16 @@ def test_the_alert_rules_are_exactly_the_ones_decided_on():
     assert set(rules) == EXPECTED_RULES
 
 
-def test_the_rules_are_evaluated_every_five_minutes_in_one_folder_nothing_is_sent_anywhere():
+def test_the_rules_run_every_five_minutes_in_one_folder_and_do_not_say_where_they_go():
     group, _ = _rules()
 
     assert group["interval"] == "5m" and group["folder"] == "Retail retention alerts"
-    # no contact point or notification policy: an alert is visible in Grafana and goes nowhere
-    assert sorted(path.name for path in ALERTING.iterdir()) == ["rules.yml"]
+    assert sorted(path.name for path in ALERTING.iterdir()) == [
+        "contactpoints.yml",
+        "policies.yml",
+        "rules.yml",
+    ]
+    # where an alert goes is decided in the other two files, so no rule can route itself elsewhere
     text = (ALERTING / "rules.yml").read_text(encoding="utf-8")
     assert "contactPoints" not in text and "notification_settings" not in text
 
@@ -502,3 +506,83 @@ def test_the_models_a_rule_asks_the_registry_about_are_the_projects_models():
             asked |= set(re.findall(r"(?<!\w)name = '([^']+)'", node["model"].get("rawSql", "")))
 
     assert asked and asked <= names, asked - names
+
+
+# ------------------------------------------------------------------- where alerts are sent
+
+PLACEHOLDER_URL = "https://alert-webhook-not-set.invalid/"
+# a real Slack webhook is hooks.slack.com/services/T.../B.../token
+SLACK_WEBHOOK = re.compile(r"hooks\.slack\.com/services/[A-Z0-9]+/[A-Z0-9]+/\w+")
+
+
+def _contact_points():
+    document = yaml.safe_load((ALERTING / "contactpoints.yml").read_text(encoding="utf-8"))
+    assert document["apiVersion"] == 1
+    return document["contactPoints"]
+
+
+def _policy():
+    document = yaml.safe_load((ALERTING / "policies.yml").read_text(encoding="utf-8"))
+    assert document["apiVersion"] == 1
+    (policy,) = document["policies"]
+    return policy
+
+
+def test_there_is_one_contact_point_and_it_is_a_slack_webhook_read_from_the_environment():
+    (contact_point,) = _contact_points()
+    (receiver,) = contact_point["receivers"]
+
+    assert contact_point["name"] == "slack-retail-alerts"
+    assert receiver["uid"] == contact_point["name"]
+    assert receiver["type"] == "slack"
+    # the address is a variable, so the file holds no secret; nothing else is set on it
+    assert receiver["settings"] == {"url": "$ALERT_WEBHOOK_URL"}
+    assert receiver["disableResolveMessage"] is False  # a "resolved" message is sent too
+
+
+def test_every_alert_goes_to_that_contact_point_with_no_sub_routes():
+    (contact_point,) = _contact_points()
+    policy = _policy()
+
+    assert policy["receiver"] == contact_point["name"]
+    assert "routes" not in policy and "matchers" not in policy and "object_matchers" not in policy
+    assert "mute_time_intervals" not in policy
+
+
+def test_a_rule_that_keeps_firing_is_repeated_every_four_hours_not_every_five_minutes():
+    policy = _policy()
+
+    assert policy["repeat_interval"] == "4h"
+    assert (policy["group_wait"], policy["group_interval"]) == ("30s", "5m")
+    assert policy["group_by"] == ["grafana_folder", "alertname"]  # one message per rule
+
+
+def test_grafana_gets_the_webhook_from_env_and_falls_back_to_an_address_that_cannot_resolve():
+    grafana = _service("grafana")
+
+    assert f"ALERT_WEBHOOK_URL: ${{ALERT_WEBHOOK_URL:-{PLACEHOLDER_URL}}}" in grafana
+    # an unset variable must never send an alert to a real host
+    assert PLACEHOLDER_URL.split("/")[2].endswith(".invalid")
+
+
+def test_env_example_lists_the_webhook_without_a_value_and_says_what_it_is():
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert re.search(r"^ALERT_WEBHOOK_URL=$", example, flags=re.M)
+    assert "secret" in example and "Slack" in example
+
+
+def test_no_slack_webhook_address_is_written_in_any_file_of_the_project():
+    # the address is a password: anyone who holds it can post in the channel
+    text_files = {".yml", ".yaml", ".md", ".py", ".json", ".sql", ".toml", ".txt", ".example"}
+    skipped = {".git", "docs", ".venv", "node_modules", ".pytest_cache"}  # .env has no suffix
+    tracked = [
+        path
+        for path in ROOT.rglob("*")
+        if path.is_file()
+        and path.suffix in text_files
+        and not skipped & set(path.relative_to(ROOT).parts)
+    ]
+    assert len(tracked) > 50  # the scan really looked at the project
+    for path in tracked:
+        assert not SLACK_WEBHOOK.search(path.read_text(encoding="utf-8", errors="ignore")), path

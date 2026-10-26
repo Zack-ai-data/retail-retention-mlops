@@ -1,0 +1,21 @@
+# Which contact point gets which alert: every alert goes to the Slack channel, in one message per
+# rule, with no sub-routes. (This replaces Grafana's built-in default, an email address nobody has.)
+#
+#   group_wait       30s  wait for the other rules that fire at the same moment, so one message
+#   group_interval   5m   how soon a rule that joins a group already notified gets its own message
+#   repeat_interval  4h   how often a rule that is STILL firing is repeated, so a problem left
+#                         alone is a reminder every four hours, not a message every five minutes
+#
+# The 4 hours is an assumption, not a measured limit. Edit this file, then
+# `docker compose restart grafana`.
+apiVersion: 1
+
+policies:
+- orgId: 1
+  receiver: slack-retail-alerts
+  group_by:
+  - grafana_folder
+  - alertname
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
