@@ -436,6 +436,9 @@ services:
       # used by services/grafana/provisioning/datasources/datasources.yml
       POSTGRES_DB: ${POSTGRES_DB}
       GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-}
+      # used by services/grafana/provisioning/alerting/contactpoints.yml; without a value alerts are
+      # evaluated but cannot be delivered (the address below never resolves)
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-https://alert-webhook-not-set.invalid/}
     ports:
       - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     volumes:

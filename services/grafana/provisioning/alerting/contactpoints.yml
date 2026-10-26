@@ -1,0 +1,20 @@
+# Where Grafana sends an alert: one Slack channel, through an incoming webhook.
+#
+# The webhook URL is a secret (anyone who has it can post to the channel), so it is not written
+# here. $ALERT_WEBHOOK_URL is filled in from the Grafana container's environment, which
+# docker-compose.yml takes from .env. If it is not set there, compose falls back to an address that
+# cannot resolve (alert-webhook-not-set.invalid): Grafana still starts and still evaluates every
+# rule, and each attempt to notify fails visibly under Alerting > Contact points.
+#
+# Edit this file, then `docker compose restart grafana`.
+apiVersion: 1
+
+contactPoints:
+- orgId: 1
+  name: slack-retail-alerts
+  receivers:
+  - uid: slack-retail-alerts
+    type: slack
+    disableResolveMessage: false
+    settings:
+      url: $ALERT_WEBHOOK_URL
