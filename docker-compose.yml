@@ -222,7 +222,7 @@ services:
   # Message broker for the Celery executor. Not published to the host.
   redis:
     # 7.2 is the last release under the original open-source licence (the same pin Airflow uses)
-    image: redis:7.2-bookworm
+    image: redis:7.4-bookworm
     profiles: ["airflow"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
