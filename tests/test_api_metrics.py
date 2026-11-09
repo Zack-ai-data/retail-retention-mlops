@@ -235,7 +235,8 @@ def test_latency_is_kept_apart_for_demo_and_real_traffic_too(plain):
     )
 
 
-def test_a_retry_that_succeeds_shows_the_versions_and_counts_both_loads():
+def test_a_retry_that_succeeds_shows_the_versions_and_counts_both_loads(db):  # noqa: F811
+    # /health also asks the database for the latest scoring run, so it needs the scratch one
     calls = {"count": 0}
     now = {"t": 1000.0}
 
