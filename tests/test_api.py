@@ -1,5 +1,7 @@
 """The HTTP API: answers, errors, and that stored and online scores agree."""
 
+import re
+
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
@@ -130,6 +132,134 @@ def test_reload_reports_when_the_models_still_cannot_be_loaded(scored):
         response = client.post("/models/reload")
 
     assert response.status_code == 503 and "still down" in response.json()["detail"]
+
+
+# ------------------------------------------------- models that were not there at start-up
+
+
+class _Clock:
+    """A clock the test moves by hand, so no test waits for real seconds."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _registry_up_after(failures):
+    """A loader that fails `failures` times (the registry is still starting), then works."""
+    calls = {"count": 0}
+
+    def loader():
+        calls["count"] += 1
+        if calls["count"] <= failures:
+            raise RegistryError("registry still starting")
+        return stub_champions()
+
+    return loader, calls
+
+
+def test_models_missing_at_start_up_are_not_asked_for_again_within_the_wait(scored):
+    loader, calls = _registry_up_after(1)
+    clock = _Clock()
+
+    with TestClient(api.create_app(loader, clock=clock, retry_seconds=10)) as client:
+        assert client.get("/customers/1/score").status_code == 503
+        clock.now += 9.9
+        assert client.get("/customers/1/score").status_code == 503
+        assert client.get("/health").status_code == 503
+
+    assert calls["count"] == 1  # only the attempt at start-up
+
+
+def test_after_the_wait_the_next_scoring_request_loads_the_models_and_is_answered(scored):
+    loader, calls = _registry_up_after(1)
+    clock = _Clock()
+
+    with TestClient(api.create_app(loader, clock=clock, retry_seconds=10)) as client:
+        assert client.get("/customers/1/score").status_code == 503
+        clock.now += 10
+
+        response = client.get("/customers/1/score")
+
+        assert response.status_code == 200
+        assert response.json()["churn_model_version"] == "7"
+    assert calls["count"] == 2
+
+
+def test_health_alone_brings_the_models_back_which_is_what_docker_calls(db):
+    loader, _ = _registry_up_after(1)
+    clock = _Clock()
+
+    with TestClient(api.create_app(loader, clock=clock, retry_seconds=10)) as client:
+        assert client.get("/health").status_code == 503
+        clock.now += 10
+
+        response = client.get("/health")
+
+        assert response.status_code == 200 and response.json()["models_loaded"] is True
+        assert response.json()["churn_model_version"] == "7"
+
+
+def test_a_registry_that_stays_down_is_asked_once_per_wait_not_once_per_request(scored):
+    loader, calls = _registry_up_after(10_000)
+    clock = _Clock()
+
+    with TestClient(api.create_app(loader, clock=clock, retry_seconds=10)) as client:
+        for _ in range(3):
+            clock.now += 10  # a wait has passed
+            for _ in range(5):  # then a burst of requests inside the next wait
+                assert client.get("/customers/1/score").status_code == 503
+
+    assert calls["count"] == 1 + 3  # start-up, then one attempt per wait, not five
+
+
+def test_once_the_models_are_loaded_nothing_asks_the_registry_again(scored):
+    loader, calls = _registry_up_after(0)
+    clock = _Clock()
+
+    with TestClient(api.create_app(loader, clock=clock, retry_seconds=10)) as client:
+        clock.now += 100_000
+        for _ in range(3):
+            assert client.get("/customers/1/score").status_code == 200
+            assert client.get("/health").status_code == 200
+
+    assert calls["count"] == 1
+
+
+def test_a_request_that_arrives_while_another_attempt_is_running_does_not_start_a_second(scored):
+    loader, calls = _registry_up_after(1)
+    clock = _Clock()
+    app = api.create_app(loader, clock=clock, retry_seconds=10)
+
+    with TestClient(app) as client:
+        clock.now += 10
+        with app.state.model_load_lock:  # an attempt is in progress
+            assert client.get("/customers/1/score").status_code == 503
+            assert calls["count"] == 1
+        assert client.get("/customers/1/score").status_code == 200  # the lock is free again
+    assert calls["count"] == 2
+
+
+def test_a_manual_reload_does_not_wait_for_the_retry_interval(scored):
+    loader, calls = _registry_up_after(1)
+    clock = _Clock()
+
+    with TestClient(api.create_app(loader, clock=clock, retry_seconds=10)) as client:
+        assert client.post("/models/reload").status_code == 200  # no time has passed
+
+    assert calls["count"] == 2
+
+
+def test_the_wait_is_no_longer_than_dockers_own_health_check_so_none_of_its_calls_is_skipped():
+    compose = (config.PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    service = re.search(r"^  api:\n(.*?)(?=^  \S|^\S|\Z)", compose, flags=re.M | re.S)
+    assert service
+    interval = re.search(r"interval: (\d+)s", service.group(1))
+    assert interval
+
+    assert 0 < api.MODEL_RETRY_SECONDS <= int(interval.group(1))
 
 
 # ----------------------------------------------------------------- online score
