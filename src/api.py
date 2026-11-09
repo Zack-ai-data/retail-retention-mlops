@@ -17,9 +17,18 @@ meaningless number. There is no authentication: this is a local service bound to
 
 GET /metrics exposes traffic, latency and the model versions being served for Prometheus
 (see src/metrics.py).
+
+The champion models are loaded when the service starts. If the registry is not ready then (after
+a Docker restart the API can come up before MLflow), the API starts without models and tries again
+by itself: /health and every scoring request make a new attempt, at most once every
+MODEL_RETRY_SECONDS, until the models are there. Docker's own health check calls /health every
+15 seconds, so a late registry is picked up without anyone running POST /models/reload (which still
+works at any time). Once loaded, nothing is retried; a newer champion is picked up by that reload.
 """
 
 import logging
+import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
@@ -34,6 +43,10 @@ from src.errors import DatabaseUnavailableError, PipelineError
 from src.metrics import METRICS_PATH, ApiMetrics
 
 log = logging.getLogger(__name__)
+
+# The least wait between two attempts to load models that were not there, so a registry that is
+# still down is not asked on every request
+MODEL_RETRY_SECONDS = 10.0
 
 
 # ------------------------------------------------------------------ schemas
@@ -124,9 +137,14 @@ def _default_loader() -> scoring.Champions:
     return scoring.load_champions(tracking.configure())
 
 
-def create_app(load_champions: Callable[[], scoring.Champions] = _default_loader) -> FastAPI:
-    """Build the API. load_champions is replaceable so tests can run without a model registry."""
+def create_app(
+    load_champions: Callable[[], scoring.Champions] = _default_loader,
+    clock: Callable[[], float] = time.monotonic,
+    retry_seconds: float = MODEL_RETRY_SECONDS,
+) -> FastAPI:
+    """Build the API. load_champions and clock are replaceable so tests need no model registry."""
     metrics = ApiMetrics()
+    loading = threading.Lock()  # one attempt to load the models at a time
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> Any:
@@ -134,6 +152,7 @@ def create_app(load_champions: Callable[[], scoring.Champions] = _default_loader
         yield
 
     def _load(app: FastAPI) -> None:
+        app.state.last_load_attempt = clock()
         try:
             app.state.champions = load_champions()
             app.state.load_error = None
@@ -148,6 +167,19 @@ def create_app(load_champions: Callable[[], scoring.Champions] = _default_loader
             log.error("Models not loaded: %s", exc)
         metrics.observe_models(app.state.champions)
 
+    def _retry_if_missing(app: FastAPI) -> None:
+        """Try again to load models that were not there, unless it was tried a moment ago."""
+        if app.state.champions is not None:
+            return
+        if not loading.acquire(blocking=False):
+            return  # another request is already trying
+        try:
+            if clock() - app.state.last_load_attempt >= retry_seconds:
+                log.info("The models are not loaded: trying again")
+                _load(app)
+        finally:
+            loading.release()
+
     app = FastAPI(
         title="Retail retention API",
         description="Churn risk, expected spend and margin at risk for customers of the UCI "
@@ -156,6 +188,7 @@ def create_app(load_champions: Callable[[], scoring.Champions] = _default_loader
         lifespan=lifespan,
     )
     app.state.metrics = metrics
+    app.state.model_load_lock = loading
     app.middleware("http")(metrics.middleware)
 
     @app.get(METRICS_PATH, include_in_schema=False)
@@ -164,6 +197,7 @@ def create_app(load_champions: Callable[[], scoring.Champions] = _default_loader
         return metrics.render()
 
     def champions(request: Request) -> scoring.Champions:
+        _retry_if_missing(request.app)
         loaded = request.app.state.champions
         if loaded is None:
             raise HTTPException(503, f"The models are not loaded: {request.app.state.load_error}")
@@ -217,6 +251,7 @@ def create_app(load_champions: Callable[[], scoring.Champions] = _default_loader
     @app.get("/health")
     def health(request: Request) -> dict[str, Any]:
         """Whether the service can answer: models loaded and the database reachable."""
+        _retry_if_missing(request.app)
         loaded = request.app.state.champions
         report: dict[str, Any] = {
             "status": "ok" if loaded is not None else "degraded",
@@ -251,7 +286,8 @@ def create_app(load_champions: Callable[[], scoring.Champions] = _default_loader
     @app.post("/models/reload")
     def reload_models(request: Request) -> dict[str, Any]:
         """Pick up newly promoted champion models without restarting the service."""
-        _load(request.app)
+        with loading:
+            _load(request.app)
         if request.app.state.champions is None:
             raise HTTPException(503, f"The models are not loaded: {request.app.state.load_error}")
         loaded = request.app.state.champions

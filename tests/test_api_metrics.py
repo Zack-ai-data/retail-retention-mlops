@@ -233,3 +233,26 @@ def test_latency_is_kept_apart_for_demo_and_real_traffic_too(plain):
         )
         is None
     )
+
+
+def test_a_retry_that_succeeds_shows_the_versions_and_counts_both_loads():
+    calls = {"count": 0}
+    now = {"t": 1000.0}
+
+    def loader():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RegistryError("registry still starting")
+        return stub_champions()
+
+    app = api.create_app(loader, clock=lambda: now["t"], retry_seconds=10)
+    with TestClient(app) as test_client:
+        assert _value(test_client, "retail_api_model_version", model="churn") == 0
+        now["t"] += 10
+
+        assert test_client.get("/health").status_code in (200, 503)  # the retry happens here
+
+        assert _value(test_client, "retail_api_model_version", model="churn") == 7
+        assert _value(test_client, "retail_api_model_version", model="value") == 9
+        assert _value(test_client, "retail_api_model_loads_total", result="failed") == 1
+        assert _value(test_client, "retail_api_model_loads_total", result="ok") == 1
