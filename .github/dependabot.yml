@@ -9,7 +9,9 @@
 #   * Major versions of anything that holds state or configuration, because an update that looks
 #     like a version bump is really a migration:
 #       postgres   a major version cannot open the existing data volume without a migration;
-#       redis      the Airflow task queue;
+#       redis      the Airflow task queue; and because 7.2 is the last release under the original
+#                  open-source licence (7.4 changed it, which is why the compose file pins 7.2),
+#                  not even a minor version is proposed, only patches of 7.2;
 #       grafana    its provisioning files and alerting change between majors;
 #       prometheus the same, for its configuration;
 #       airflow    the DAG API and the database schema change between majors.
@@ -100,7 +102,7 @@ updates:
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   # The images docker-compose.yml starts without building them: Postgres, Redis, Prometheus and
-  # Grafana. Minor and patch updates only (see the top of this file for why).
+  # Grafana. Minor and patch updates only, except Redis (patches only); see the top of this file.
   - package-ecosystem: "docker-compose"
     directory: "/"
     schedule:
@@ -115,7 +117,7 @@ updates:
       - dependency-name: "postgres"
         update-types: ["version-update:semver-major"]
       - dependency-name: "redis"
-        update-types: ["version-update:semver-major"]
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "prom/prometheus"
         update-types: ["version-update:semver-major"]
       - dependency-name: "grafana/grafana-oss"
