@@ -33,11 +33,13 @@ def test_there_is_exactly_one_schedule_and_it_is_weekly_on_monday():
     assert minute.isdigit() and hour.isdigit()
 
 
-def test_it_runs_at_ten_in_the_morning_in_malaysia():
-    # GitHub reads the time as UTC: 02:00 UTC is 10:00 in Malaysia (UTC+8)
+def test_it_runs_in_the_ten_oclock_hour_in_malaysia_but_not_on_the_hour():
+    # GitHub reads the time as UTC: 02:17 UTC is 10:17 in Malaysia (UTC+8). The start of an hour is
+    # when GitHub is busiest and delays scheduled runs, so the minute is deliberately not 0
     minute, hour, *_ = _cron_fields()
 
-    assert (int(hour) + MALAYSIA_OFFSET_HOURS) % 24 == 10 and int(minute) == 0
+    assert (int(hour) + MALAYSIA_OFFSET_HOURS) % 24 == 10
+    assert int(minute) not in (0, 30)
 
 
 def test_the_other_triggers_are_unchanged():
@@ -76,13 +78,13 @@ def test_the_workflow_needs_no_secret_and_can_only_read_the_repository():
 
 
 @pytest.mark.parametrize(
-    "fact", ["02:00 UTC", "60 days", "public", "reproducibility", "NOT pinned"]
+    "fact", ["02:17 UTC", "60 days", "public", "reproducibility", "NOT pinned", "hours late"]
 )
 def test_the_workflow_file_explains_what_the_schedule_is_and_is_not(fact):
     assert fact in CI_TEXT
 
 
 def test_the_header_and_the_cron_line_agree():
-    # the comment says Mondays at 02:00 UTC; the line must say the same
-    assert re.search(r'cron: "0 2 \* \* 1"', CI_TEXT)
-    assert "Mondays at 02:00 UTC" in CI_TEXT
+    # the comment says Mondays at 02:17 UTC; the line must say the same
+    assert re.search(r'cron: "17 2 \* \* 1"', CI_TEXT)
+    assert "Mondays at 02:17 UTC" in CI_TEXT

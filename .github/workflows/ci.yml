@@ -15,7 +15,7 @@
 # The last two do not run on pull requests, so they cannot be required checks. A red run on main
 # means a change got through that the fast tests could not catch: fix it with a new pull request.
 #
-# Weekly: every job above also runs on a schedule, Mondays at 02:00 UTC (10:00 in Malaysia). Nothing
+# Weekly: every job above also runs on a schedule, Mondays at 02:17 UTC (10:17 in Malaysia). Nothing
 # in the repository has to change for it to go red. What it can catch is what is NOT pinned: the
 # Docker images (python, postgres, the Airflow tag), the runner image and the actions move on their
 # own, while the Python libraries are locked by hash and cannot. It is a reproducibility check, not
@@ -23,7 +23,8 @@
 #   * it runs on GitHub's machines with their own throwaway Postgres and MLflow (never your laptop's
 #     stack), and nothing it produces outlives the run;
 #   * GitHub switches scheduled workflows off after 60 days with no activity in the repository (re-
-#     enable under Actions), and may start a run several minutes late;
+#     enable under Actions), and delays scheduled runs when it is busy, most of all at the start of
+#     an hour: the first two runs, at :00, started 5 and 6.5 hours late, hence minute 17;
 #   * it is free because this repository is public, and it uses no secret;
 #   * a failed run emails whoever last changed the schedule line, if their GitHub notification
 #     settings allow it (Settings > Notifications > Actions).
@@ -34,7 +35,7 @@ on:
     branches: [main, master]
   pull_request:
   schedule:
-    - cron: "0 2 * * 1"
+    - cron: "17 2 * * 1"
   workflow_dispatch:
 
 permissions:

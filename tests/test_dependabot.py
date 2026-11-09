@@ -116,13 +116,24 @@ def test_no_image_compose_starts_can_jump_a_major_version():
 
     # every image pulled from a registry has a decision; a new one fails here until it has one
     assert started == {"postgres", "redis", "prom/prometheus", "grafana/grafana-oss"}
-    assert {name for name, kinds in _ignored(compose).items() if kinds == {MAJOR}} == started
+    ignored = _ignored(compose)
+    assert {name for name, kinds in ignored.items() if kinds == {MAJOR}} == started - {"redis"}
+    assert MAJOR in ignored["redis"]
 
 
 def test_a_major_postgres_upgrade_in_particular_is_blocked():
     (compose,) = _entries("docker-compose")
 
     assert _ignored(compose)["postgres"] == {MAJOR}  # it would not open the existing data volume
+
+
+def test_redis_gets_patches_only_because_the_next_minor_changes_its_licence():
+    (compose,) = _entries("docker-compose")
+
+    assert _ignored(compose)["redis"] == {MAJOR, MINOR}
+    # the pin Dependabot must not move, and the reason, are both written where people will look
+    assert "image: redis:7.2" in COMPOSE and "original open-source licence" in COMPOSE
+    assert "licence" in CONFIG_TEXT and "7.2" in CONFIG_TEXT
 
 
 def test_actions_updates_arrive_in_one_pull_request_not_one_per_action():
