@@ -130,6 +130,68 @@ groups:
     labels:
       severity: alert
     isPaused: false
+  - uid: retail-realised-performance
+    title: Realised churn performance is poor
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: retail-warehouse
+      model:
+        refId: A
+        format: time_series
+        rawQuery: true
+        editorMode: code
+        rawSql: SELECT now() AS time, (status = 'alert')::int::float8 AS value FROM ml.monitor_realised
+          WHERE snapshot_date = (SELECT max(snapshot_date) FROM ml.monitor_realised) ORDER BY scoring_run_id
+          DESC LIMIT 1
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        datasource: *id001
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        datasource: *id001
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+          type: query
+    noDataState: OK
+    execErrState: Error
+    for: 0s
+    annotations:
+      summary: The churn probabilities that were served did clearly worse than expected once the outcomes
+        were known.
+      description: 'For the latest scoring run whose outcomes are known, either the average probability
+        that was served is 10 points or more away from the share of customers who churned, or the model
+        is not clearly better than ranking by recency. See the Models dashboard. The limits are assumptions,
+        not fitted. On the real data this cannot fire: the dataset is static, so the live scoring runs
+        never get outcomes.'
+    labels:
+      severity: alert
+    isPaused: false
   - uid: retail-model-not-promoted
     title: The newest model version was not promoted
     condition: C

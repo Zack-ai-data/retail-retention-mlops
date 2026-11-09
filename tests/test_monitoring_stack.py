@@ -348,6 +348,7 @@ ALERTING = GRAFANA / "provisioning" / "alerting"
 EXPECTED_RULES = {
     "retail-drift-churn-probability",
     "retail-drift-inputs",
+    "retail-realised-performance",
     "retail-model-not-promoted",
     "retail-champion-old",
     "retail-airflow-run-failed",

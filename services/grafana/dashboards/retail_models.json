@@ -761,6 +761,227 @@
           }
         ]
       }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Calibration gap, latest run with outcomes",
+      "description": "The average churn probability that was served minus the share of customers who really churned, as a size (the table has the sign). From 0.05 a warning, from 0.10 an alert; these limits are assumptions. The dataset is static and ends in December 2011, so the live scoring runs never get their outcomes: this is empty on the real data and is shown to work by the tests.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "retail-warehouse"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "retail-warehouse"
+          },
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT abs(calibration_gap) FROM ml.monitor_realised WHERE snapshot_date = (SELECT max(snapshot_date) FROM ml.monitor_realised) ORDER BY scoring_run_id DESC LIMIT 1"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 3,
+          "noValue": "no outcomes yet",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Gain over the recency rule, low end",
+      "description": "How much better the model ranks customers than 'the longer since the last order, the likelier the churn', at the low end of a 95% interval. Above zero is clearly better; at or below zero is an alert. The dataset is static and ends in December 2011, so the live scoring runs never get their outcomes: this is empty on the real data and is shown to work by the tests.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "retail-warehouse"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "retail-warehouse"
+          },
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT gain_ci_low FROM ml.monitor_realised WHERE snapshot_date = (SELECT max(snapshot_date) FROM ml.monitor_realised) ORDER BY scoring_run_id DESC LIMIT 1"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 3,
+          "noValue": "no outcomes yet",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1e-06
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Scoring runs whose outcomes are known",
+      "description": "One row for each scoring run whose 90 days have ended: the churn probabilities that were served against what the customers did. The status is written as well as coloured. The dataset is static and ends in December 2011, so the live scoring runs never get their outcomes: this is empty on the real data and is shown to work by the tests.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "retail-warehouse"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "retail-warehouse"
+          },
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT snapshot_date::text AS snapshot, churn_model_version AS \"model version\", customers, round(actual_churn_rate::numeric, 3) AS \"actual churn\", round(mean_p_churn::numeric, 3) AS \"predicted churn\", round(calibration_gap::numeric, 3) AS gap, round(gain::numeric, 3) AS gain, round(gain_ci_low::numeric, 3) AS \"gain low\", round(gain_ci_high::numeric, 3) AS \"gain high\", status FROM ml.monitor_realised ORDER BY scoring_run_id DESC"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "ok": {
+                        "text": "ok",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "warn": {
+                        "text": "warn",
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "alert": {
+                        "text": "alert",
+                        "color": "red",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }
