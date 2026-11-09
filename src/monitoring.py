@@ -12,6 +12,9 @@ never needs access to a row about a customer.
                        ml.monitor_drift              how far each model input, and the churn
                                                     probability, has moved from the same time of
                                                     year a year earlier
+                       ml.monitor_realised           how the churn probabilities that were served
+                                                    did against what the customers then did, for
+                                                    every scoring run whose outcomes are known
   from MLflow          ml.monitor_model_versions     every version of the project's models and
                                                     what the promotion gate decided
                        ml.monitor_model_metrics      every metric logged for those versions
@@ -30,14 +33,25 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import psycopg
 from mlflow import MlflowClient
 from mlflow.entities.model_registry import ModelVersion
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, ErrorCode
+from sklearn.metrics import average_precision_score
 
-from src import config, database, features, promotion_status, scoring, tracking
+from src import (
+    config,
+    database,
+    evaluation,
+    features,
+    measures,
+    promotion_status,
+    scoring,
+    tracking,
+)
 from src.errors import RegistryError
 
 log = logging.getLogger(__name__)
@@ -82,12 +96,41 @@ CHURN_PROBABILITY = "p_churn"
 DRIFT_TABLE_COLUMNS = ["snapshot_date", "reference_date", "column_name", "psi", "status"]
 _EPSILON = 1e-4  # a bin with no customers counts as this share, so the log is defined
 
+# Realised performance: once the 90 days after a scoring run have passed, the probabilities that
+# were served can be compared with what the customers did. PR-AUC alone cannot say whether that is
+# good: it moves with the churn rate (the backtest's goes from 0.85 to 0.65 only because the churn
+# rate falls from 65% to 39%), so the measure that is judged is the GAIN over ranking customers by
+# recency, with its bootstrap interval, plus the calibration gap (the average probability served
+# minus the share that actually churned). The 0.05 and 0.10 are assumptions, not fitted. On the one
+# labelled snapshot the champion had not trained on (September 2011) the gap is 0.087: a warning.
+REALISED_WARN = 0.05
+REALISED_ALERT = 0.10
+REALISED_MIN_CUSTOMERS = 100  # fewer customers than this say too little about a model
+REALISED_COLUMNS = [
+    "scoring_run_id",
+    "snapshot_date",
+    "churn_model_version",
+    "customers",
+    "actual_churn_rate",
+    "mean_p_churn",
+    "calibration_gap",
+    "ece",
+    "model_pr_auc",
+    "recency_pr_auc",
+    "gain",
+    "gain_ci_low",
+    "gain_ci_high",
+    "significant",
+    "status",
+]
+
 # Every table, in the order they are replaced
 TABLES = [
     "ml.monitor_snapshot_summary",
     "ml.monitor_score_distribution",
     "ml.monitor_segment_sizes",
     "ml.monitor_drift",
+    "ml.monitor_realised",
     "ml.monitor_model_versions",
     "ml.monitor_model_metrics",
     "ml.monitor_backtest",
@@ -274,6 +317,82 @@ def drift_status(value: float) -> str:
     return "ok"
 
 
+def realised_status(calibration_gap: float, significant: bool) -> str:
+    """alert when the probabilities are off by REALISED_ALERT or more, or the model is not clearly
+    better than ranking by recency; warn from REALISED_WARN; otherwise ok."""
+    if abs(calibration_gap) >= REALISED_ALERT or not significant:
+        return "alert"
+    if abs(calibration_gap) >= REALISED_WARN:
+        return "warn"
+    return "ok"
+
+
+def realised_row(
+    churned: npt.ArrayLike, p_churn: npt.ArrayLike, recency_days: npt.ArrayLike
+) -> dict[str, Any] | None:
+    """The measures for one scoring run: churned is 1 where the customer did not buy again, p_churn
+    the probability that was served, recency_days the rule it is compared with (the longer since
+    the last order, the likelier the churn). None when there are too few customers, or all of them
+    did the same, so the ranking cannot be judged."""
+    y = np.asarray(churned, dtype=int)
+    p = np.asarray(p_churn, dtype=float)
+    if len(y) < REALISED_MIN_CUSTOMERS or len(np.unique(y)) < 2:
+        return None
+    gain = evaluation.paired_bootstrap(
+        y, p, np.asarray(recency_days, dtype=float), average_precision_score
+    )
+    significant = gain.excludes_zero_above()
+    gap = float(p.mean() - y.mean())
+    return {
+        "customers": len(y),
+        "actual_churn_rate": float(y.mean()),
+        "mean_p_churn": float(p.mean()),
+        "calibration_gap": gap,
+        "ece": measures.expected_calibration_error(y, p),
+        "model_pr_auc": gain.candidate,
+        "recency_pr_auc": gain.reference,
+        "gain": gain.diff,
+        "gain_ci_low": gain.low,
+        "gain_ci_high": gain.high,
+        "significant": significant,
+        "status": realised_status(gap, significant),
+    }
+
+
+_REALISED_QUERY = """
+    SELECT r.scoring_run_id, r.snapshot_date, r.churn_model_version,
+           p.p_churn, s.label_churned::int AS churned, s.recency_days::float8 AS recency_days
+    FROM ml.scoring_runs r
+    JOIN ml.predictions p ON p.scoring_run_id = r.scoring_run_id
+    JOIN marts.customer_snapshots s
+      ON s.snapshot_date = r.snapshot_date AND s.customer_id = p.customer_id
+    WHERE s.label_churned IS NOT NULL
+    ORDER BY r.scoring_run_id
+"""
+
+
+def realised_table(conn: psycopg.Connection[Any]) -> pd.DataFrame:
+    """One row for each scoring run whose customers' outcomes are known. The customer rows are
+    read here and reduced to numbers; none of them is stored."""
+    joined = database.read_dataframe(conn, _REALISED_QUERY)
+    rows = []
+    for run_id, part in joined.groupby("scoring_run_id"):
+        row = realised_row(part["churned"], part["p_churn"], part["recency_days"])
+        if row is None:
+            log.info("Scoring run %s is too small or one-sided to judge; skipped", run_id)
+            continue
+        first = part.iloc[0]
+        rows.append(
+            {
+                "scoring_run_id": int(run_id),
+                "snapshot_date": first["snapshot_date"],
+                "churn_model_version": str(first["churn_model_version"]),
+                **row,
+            }
+        )
+    return pd.DataFrame(rows, columns=REALISED_COLUMNS)
+
+
 def reference_snapshot(later: Any, dates: list[Any]) -> Any | None:
     """The snapshot about a year before `later` (closest to 364 days), or None if there is none."""
     gaps = {d: (later - d).days for d in dates}
@@ -338,6 +457,7 @@ def refresh(conn: psycopg.Connection[Any], client: MlflowClient) -> dict[str, in
     versions, metrics = model_tables(client)
     backtest = backtest_table(client)
     drift = _drift(conn, client)
+    realised = realised_table(conn)
 
     with conn.transaction():
         for table in reversed(TABLES):
@@ -346,6 +466,7 @@ def refresh(conn: psycopg.Connection[Any], client: MlflowClient) -> dict[str, in
         conn.execute(_SCORE_DISTRIBUTION)
         conn.execute(_SEGMENT_SIZES)
         database.copy_dataframe(conn, drift, "ml.monitor_drift")
+        database.copy_dataframe(conn, realised, "ml.monitor_realised")
         database.copy_dataframe(conn, versions, "ml.monitor_model_versions")
         database.copy_dataframe(conn, metrics, "ml.monitor_model_metrics")
         database.copy_dataframe(conn, backtest, "ml.monitor_backtest")
