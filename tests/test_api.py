@@ -1,13 +1,15 @@
 """The HTTP API: answers, errors, and that stored and online scores agree."""
 
 import re
+import uuid
 
 import pandas as pd
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from src import api, config, features, optimizer, processor, scoring
-from src.errors import RegistryError
+from src import api, config, database, features, optimizer, processor, scoring
+from src.errors import PipelineError, RegistryError
 from tests.test_scoring import RAW, stub_champions
 
 # --------------------------------------------------------------------- fixtures
@@ -535,3 +537,93 @@ def test_a_customers_features_can_be_fetched_as_a_what_if_starting_point(client,
 def test_features_are_not_given_for_unknown_or_lapsed_customers(client, scored):
     assert client.get("/customers/999999/features").status_code == 404
     assert client.get("/customers/3/features").status_code == 422
+
+
+# ------------------------------------------- a database that is reachable but has no tables
+
+
+@pytest.fixture
+def bare_database(monkeypatch):
+    """A new, empty database (no tables at all): a machine before the pipeline has ever run."""
+    try:
+        admin = database.get_connection(dbname="postgres", retries=1, autocommit=True)
+    except PipelineError as exc:
+        pytest.skip(f"PostgreSQL not available: {exc}")
+    name = f"test_{uuid.uuid4().hex[:8]}"
+    admin.execute(f'CREATE DATABASE "{name}"')
+    monkeypatch.setattr(config, "POSTGRES_DB", name)
+    try:
+        yield name
+    finally:
+        admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+        admin.close()
+
+
+def test_health_says_the_database_is_not_ready_instead_of_crashing(bare_database):
+    with TestClient(api.create_app(stub_champions)) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["database"] == "not ready" and detail["status"] == "degraded"
+    assert detail["models_loaded"] is True  # the models are fine; only the data is missing
+    assert detail["problem"] == api.DATA_NOT_LOADED
+
+
+def test_health_with_neither_models_nor_tables_is_still_a_clean_503(bare_database):
+    def no_models():
+        raise RegistryError("registry down")
+
+    with TestClient(api.create_app(no_models)) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["database"] == "not ready"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/customers/1/score",
+        "/customers/1/prediction",
+        "/customers/1/features",
+        "/outreach/latest",
+        "/outreach/sensitivity",
+    ],
+)
+def test_every_endpoint_that_reads_a_table_answers_503_with_what_to_run(bare_database, path):
+    with TestClient(api.create_app(stub_champions)) as client:
+        response = client.get(path)
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": api.DATA_NOT_LOADED}
+    assert "python -m src.main --stage all" in response.json()["detail"]
+
+
+def test_the_databases_own_message_never_reaches_the_caller(bare_database):
+    with TestClient(api.create_app(stub_champions)) as client:
+        texts = [client.get(path).text for path in ("/health", "/customers/1/score")]
+
+    for text in texts:
+        assert "relation" not in text and "SELECT" not in text and "UndefinedTable" not in text
+
+
+def test_only_a_missing_table_is_turned_into_a_503_other_database_errors_still_fail(
+    bare_database,
+):
+    app = api.create_app(stub_champions)
+
+    @app.get("/boom")
+    def boom():
+        raise psycopg.errors.SyntaxError("a bug in a query")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.get("/boom").status_code == 500  # a real bug is not hidden as "no data"
+
+
+def test_a_missing_table_is_counted_as_the_503_it_is(bare_database):
+    with TestClient(api.create_app(stub_champions)) as client:
+        client.get("/customers/1/score")
+        exposed = client.get("/metrics").text
+
+    assert 'status="503"' in exposed and 'status="500"' not in exposed

@@ -24,6 +24,9 @@ by itself: /health and every scoring request make a new attempt, at most once ev
 MODEL_RETRY_SECONDS, until the models are there. Docker's own health check calls /health every
 15 seconds, so a late registry is picked up without anyone running POST /models/reload (which still
 works at any time). Once loaded, nothing is retried; a newer champion is picked up by that reload.
+
+A database that is reachable but has no data tables yet (a new machine, before the pipeline has
+run) is answered with a 503 that says what to run, never a 500: see DATA_NOT_LOADED.
 """
 
 import logging
@@ -36,6 +39,7 @@ from typing import Annotated, Any, Literal
 import pandas as pd
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from src import config, database, features, optimizer, scoring, tracking
@@ -47,6 +51,13 @@ log = logging.getLogger(__name__)
 # The least wait between two attempts to load models that were not there, so a registry that is
 # still down is not asked on every request
 MODEL_RETRY_SECONDS = 10.0
+
+# What every answer says when the database is reachable but a table is missing. It is a fixed text
+# so the database's own message, which can contain a query, never reaches a caller.
+DATA_NOT_LOADED = (
+    "The warehouse has no data tables yet. Load the data and build the tables first: "
+    "python -m src.main --stage all"
+)
 
 
 # ------------------------------------------------------------------ schemas
@@ -189,6 +200,11 @@ def create_app(
     )
     app.state.metrics = metrics
     app.state.model_load_lock = loading
+
+    @app.exception_handler(psycopg.errors.UndefinedTable)
+    def data_not_loaded(request: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": DATA_NOT_LOADED})
+
     app.middleware("http")(metrics.middleware)
 
     @app.get(METRICS_PATH, include_in_schema=False)
@@ -279,6 +295,10 @@ def create_app(
             report["database"] = "unavailable"
             report["status"] = "degraded"
             report["problem"] = str(exc)
+        except psycopg.errors.UndefinedTable:
+            report["database"] = "not ready"
+            report["status"] = "degraded"
+            report["problem"] = DATA_NOT_LOADED
         if report["status"] != "ok":
             raise HTTPException(503, detail=report)
         return report

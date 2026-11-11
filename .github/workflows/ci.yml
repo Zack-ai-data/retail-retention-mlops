@@ -11,8 +11,12 @@
 #                  hyperparameter grids and 1,000 resamples (FULL_TRAINING_TESTS=1).
 #   regression     after a merge to main (and by hand): loads the real dataset and checks that
 #                  the pinned results still reproduce.
+#   fresh-machine  after a merge to main (and by hand): what a new machine does, from nothing.
+#                  Starts the database, MLflow and the API on empty volumes, checks the API
+#                  answers a clean 503 that says what to run, runs the whole pipeline, then
+#                  checks the API serves a real customer without anyone reloading it.
 #
-# The last two do not run on pull requests, so they cannot be required checks. A red run on main
+# The last three do not run on pull requests, so they cannot be required checks. A red run on main
 # means a change got through that the fast tests could not catch: fix it with a new pull request.
 #
 # Weekly: every job above also runs on a schedule, Mondays at 02:17 UTC (10:17 in Malaysia). Nothing
@@ -268,3 +272,74 @@ jobs:
 
       - name: Real-data regression tests
         run: python -m pytest -m warehouse --require-warehouse -q
+
+  # What a new machine does, from nothing, with the project's own docker-compose.yml: the tests above
+  # run on a database and a registry that already exist, so a step that only works because of what
+  # the developer's machine already holds (data, models, tables) would never show there. Throwaway
+  # credentials that exist only inside this job; no secret is used.
+  fresh-machine:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      POSTGRES_USER: ci_admin
+      POSTGRES_PASSWORD: ci_password
+      POSTGRES_DB: retail_dw
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The API is left out of the wait: with no data it is meant to report itself as not ready
+      - name: Build and start the database and MLflow on empty volumes
+        run: docker compose up -d --build --wait postgres mlflow
+
+      - name: Build and start the API
+        run: docker compose up -d --build api
+
+      # No tables, no models: the API must start, answer, and say what to run (a 503, never a 500)
+      - name: With no data the API answers a clean 503 that says what to run
+        run: |
+          code=000
+          for i in $(seq 1 60); do
+            code=$(curl -s -o health.json -w '%{http_code}' http://127.0.0.1:8000/health || true)
+            [ "$code" = 503 ] && break
+            sleep 2
+          done
+          echo "HTTP $code"; cat health.json; echo
+          test "$code" = 503
+          grep -q '"database":"not ready"' health.json
+          grep -q 'python -m src.main --stage all' health.json
+
+      - name: Load, build, train, score, plan and monitor from nothing
+        run: docker compose run --rm app python -m src.main --stage all
+
+      # Nobody calls /models/reload: the API fetches the models itself when asked about its health
+      - name: The API picks the models up by itself and serves a real customer
+        run: |
+          code=000
+          for i in $(seq 1 60); do
+            code=$(curl -s -o health.json -w '%{http_code}' http://127.0.0.1:8000/health || true)
+            [ "$code" = 200 ] && break
+            sleep 5
+          done
+          echo "HTTP $code"; cat health.json; echo
+          test "$code" = 200
+          grep -q '"models_loaded":true' health.json
+          grep -q '"database":"ok"' health.json
+          curl -sf http://127.0.0.1:8000/outreach/latest -o plan.json
+          id=$(grep -o '"customer_id":[0-9]*' plan.json | head -1 | cut -d: -f2)
+          echo "customer $id"
+          test -n "$id"
+          curl -sf "http://127.0.0.1:8000/customers/$id/score" > /dev/null
+          curl -sf "http://127.0.0.1:8000/customers/$id/prediction" > /dev/null
+
+      - name: Container logs, if anything failed
+        if: failure()
+        run: docker compose logs --no-color --tail 200 postgres mlflow api
+
+      # --profile app: the API and the pipeline service belong to that profile, and a plain `down`
+      # leaves any service whose profile is not switched on running
+      - name: Tear down
+        if: always()
+        run: docker compose --profile app down -v

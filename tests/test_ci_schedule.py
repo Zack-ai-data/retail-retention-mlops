@@ -56,19 +56,20 @@ def test_a_push_to_main_cannot_cancel_the_weekly_run():
 
 
 def test_the_slow_jobs_run_on_the_schedule_and_only_pull_requests_skip_them():
-    for job in ("full-training", "regression"):
+    for job in ("full-training", "regression", "fresh-machine"):
         assert CI["jobs"][job]["if"] == "github.event_name != 'pull_request'"
     for job in ("quality", "dashboard", "airflow-dags"):
         assert "if" not in CI["jobs"][job]  # these run on every trigger, the schedule included
 
 
-def test_the_weekly_run_has_the_same_five_jobs_as_any_other():
+def test_the_weekly_run_has_the_same_six_jobs_as_any_other():
     assert set(CI["jobs"]) == {
         "quality",
         "dashboard",
         "airflow-dags",
         "full-training",
         "regression",
+        "fresh-machine",
     }
 
 
