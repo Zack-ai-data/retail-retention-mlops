@@ -3,10 +3,10 @@
 #   quality        every push and pull request: lint, format, strict types and the fast tests.
 #                  Training tests use one hyperparameter combination and 100 bootstrap resamples
 #                  (tests/conftest.py), so it takes minutes, not the 23 it took with the real
-#                  settings. This and `dashboard` are the checks a pull request must pass.
+#                  settings. This, `dashboard` and `airflow-dags` are the checks a pull request must pass.
 #   dashboard      the Streamlit dashboard's tests, from their own lock file.
 #   airflow-dags   every push and pull request: builds the Airflow image and loads every DAG in it.
-#                  Advisory: not a required check yet (see the job).
+#                  A required check (see the job).
 #   full-training  after a merge to main (and by hand): the same tests with the real
 #                  hyperparameter grids and 1,000 resamples (FULL_TRAINING_TESTS=1).
 #   regression     after a merge to main (and by hand): loads the real dataset and checks that
@@ -135,8 +135,8 @@ jobs:
   # (a typo in a stage name, a bad import) is silently left out of Airflow and only shows up as an
   # import error in its interface; here it fails the build. Nothing is published.
   #
-  # Advisory for now: it is not one of the checks a pull request must pass (the repository
-  # ruleset requires only `quality` and `dashboard`). Make it required once its timing is known.
+  # A required check: the repository ruleset requires `quality`, `dashboard` and this job
+  # before a pull request can merge.
   # The image is large, so its layers are cached: the slow step (the pipeline's libraries) only
   # rebuilds when requirements.lock changes.
   airflow-dags:
