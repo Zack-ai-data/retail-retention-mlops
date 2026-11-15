@@ -11,3 +11,6 @@ htmlcov/
 
 # private working material: review request, reviewer feedback, generated figures and data
 docs/review/
+
+# local notes kept out of the repository (full earlier versions of the documentation)
+notes/
