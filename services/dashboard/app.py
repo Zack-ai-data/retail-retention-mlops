@@ -4,6 +4,7 @@ Everything on screen comes from the API (src/api.py); this file only lays it out
 behind each page lives in src/dashboard_client.py, where it is tested.
 """
 
+import os
 from typing import Any
 
 import pandas as pd
@@ -65,7 +66,8 @@ with st.sidebar:
             st.caption("No scoring run yet: python -m src.main --stage score")
     else:
         st.warning(f"The API is degraded: {health.get('problem', 'unknown problem')}")
-    if st.button("Reload models", key="reload"):
+    # a public deployment sets DASHBOARD_ALLOW_RELOAD=0: visitors must not be offered this
+    if os.getenv("DASHBOARD_ALLOW_RELOAD", "1") != "0" and st.button("Reload models", key="reload"):
         _, reload_problem = call(client.reload_models)
         if reload_problem is not None:
             st.error(str(reload_problem))

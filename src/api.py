@@ -13,7 +13,15 @@ inputs more current. Every answer says which model versions produced it.
 
 Only customers in the models' population (bought within the last 180 days) can be scored; others
 are lapsed customers for a win-back list, and asking about them is an explained error, not a
-meaningless number. There is no authentication: this is a local service bound to 127.0.0.1.
+meaningless number.
+
+Access control. With no API_KEY set the API is open, as it is on a developer's machine (the
+service is bound to 127.0.0.1). With one set, every route needs it in the X-API-Key header, except
+the OPEN_PATHS: /health (which then answers only with its status unless a key is sent), /metrics
+(for Prometheus; a public deployment must not route it) and the interactive docs. POST
+/models/reload needs API_ADMIN_KEY, a second key that is not shared; the shared key gets a 403,
+and without an admin key reloading is switched off. Keys are compared in constant time. Request
+rate limits are not here: they need the caller's real address, which only a reverse proxy knows.
 
 GET /metrics exposes traffic, latency and the model versions being served for Prometheus
 (see src/metrics.py).
@@ -30,6 +38,7 @@ run) is answered with a 503 that says what to run, never a 500: see DATA_NOT_LOA
 """
 
 import logging
+import secrets
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -38,8 +47,9 @@ from typing import Annotated, Any, Literal
 
 import pandas as pd
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from src import config, database, features, optimizer, scoring, tracking
@@ -58,6 +68,20 @@ DATA_NOT_LOADED = (
     "The warehouse has no data tables yet. Load the data and build the tables first: "
     "python -m src.main --stage all"
 )
+
+API_KEY_HEADER = "X-API-Key"
+# The routes that never need a key. Everything else is behind the key when one is set, so a route
+# added later is protected unless it is deliberately put here (a test checks this).
+OPEN_PATHS = frozenset({"/health", "/metrics", "/docs", "/redoc", "/openapi.json"})
+# What /health says to a caller without a valid key: whether it works, not how it is set up
+_PUBLIC_HEALTH_FIELDS = ("status", "models_loaded", "database")
+
+
+def _key_matches(given: str | None, expected: str) -> bool:
+    """Constant-time comparison. Bytes, so a header with non-ASCII characters is simply wrong."""
+    if given is None or not expected:
+        return False
+    return secrets.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
 
 
 # ------------------------------------------------------------------ schemas
@@ -152,8 +176,14 @@ def create_app(
     load_champions: Callable[[], scoring.Champions] = _default_loader,
     clock: Callable[[], float] = time.monotonic,
     retry_seconds: float = MODEL_RETRY_SECONDS,
+    api_key: str | None = None,
+    admin_key: str | None = None,
 ) -> FastAPI:
-    """Build the API. load_champions and clock are replaceable so tests need no model registry."""
+    """Build the API. load_champions and clock are replaceable so tests need no model registry.
+    api_key and admin_key default to the API_KEY and API_ADMIN_KEY settings; an empty api_key
+    leaves the API open."""
+    shared_key = config.API_KEY if api_key is None else api_key
+    reload_key = config.API_ADMIN_KEY if admin_key is None else admin_key
     metrics = ApiMetrics()
     loading = threading.Lock()  # one attempt to load the models at a time
 
@@ -195,11 +225,53 @@ def create_app(
         title="Retail retention API",
         description="Churn risk, expected spend and margin at risk for customers of the UCI "
         "Online Retail II dataset. See docs/problem_statement.md for what the numbers mean "
-        "and what they do not claim.",
+        "and what they do not claim. When the server asks for a key, send it in the "
+        f"{API_KEY_HEADER} header.",
         lifespan=lifespan,
     )
     app.state.metrics = metrics
     app.state.model_load_lock = loading
+    app.state.auth_enabled = bool(shared_key)
+    if not shared_key:
+        log.warning("API_KEY is not set: the API is open to anyone who can reach it")
+
+    key_header = APIKeyHeader(
+        name=API_KEY_HEADER, auto_error=False, description="The API key, if the server needs one."
+    )
+
+    def has_valid_key(given: str | None) -> bool:
+        # both comparisons always run, so the time taken does not say which key was close
+        shared = _key_matches(given, shared_key)
+        admin = _key_matches(given, reload_key)
+        return not shared_key or shared or admin
+
+    def key_is_valid(
+        given: Annotated[
+            str | None,
+            Header(alias=API_KEY_HEADER, description="Optional: a valid key gets more detail."),
+        ] = None,
+    ) -> bool:
+        return has_valid_key(given)
+
+    def require_key(given: Annotated[str | None, Depends(key_header)]) -> None:
+        if not has_valid_key(given):
+            raise HTTPException(
+                401,
+                f"Missing or wrong API key: send it in the {API_KEY_HEADER} header.",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+
+    def require_admin(given: Annotated[str | None, Depends(key_header)]) -> None:
+        if not shared_key:
+            return  # an open API, as on a developer's machine
+        if not reload_key:
+            raise HTTPException(403, "Reloading the models is switched off on this server.")
+        if not _key_matches(given, reload_key):
+            raise HTTPException(403, "This needs the admin key, not the shared one.")
+
+    # Every route that is not open is added here, so a key is needed unless a route is deliberately
+    # left on `app` (and listed in OPEN_PATHS)
+    protected = APIRouter(dependencies=[Depends(require_key)])
 
     @app.exception_handler(psycopg.errors.UndefinedTable)
     def data_not_loaded(request: Request, exc: Exception) -> JSONResponse:
@@ -265,7 +337,9 @@ def create_app(
         return row[0] if row else None
 
     @app.get("/health")
-    def health(request: Request) -> dict[str, Any]:
+    def health(
+        request: Request, authorized: Annotated[bool, Depends(key_is_valid)]
+    ) -> dict[str, Any]:
         """Whether the service can answer: models loaded and the database reachable."""
         _retry_if_missing(request.app)
         loaded = request.app.state.champions
@@ -299,11 +373,13 @@ def create_app(
             report["database"] = "not ready"
             report["status"] = "degraded"
             report["problem"] = DATA_NOT_LOADED
+        if not authorized:  # whether it works, not how it is set up
+            report = {name: report[name] for name in _PUBLIC_HEALTH_FIELDS if name in report}
         if report["status"] != "ok":
             raise HTTPException(503, detail=report)
         return report
 
-    @app.post("/models/reload")
+    @protected.post("/models/reload", dependencies=[Depends(require_admin)])
     def reload_models(request: Request) -> dict[str, Any]:
         """Pick up newly promoted champion models without restarting the service."""
         with loading:
@@ -331,7 +407,7 @@ def create_app(
             )
         return frame
 
-    @app.get("/customers/{customer_id}/features")
+    @protected.get("/customers/{customer_id}/features")
     def customer_features(customer_id: int, conn: Conn) -> dict[str, Any]:
         """The model inputs for a customer: a starting point for what-if questions (POST /score)."""
         frame = scorable_customer(conn, customer_id)
@@ -345,7 +421,7 @@ def create_app(
             },
         }
 
-    @app.get("/customers/{customer_id}/score", response_model=ScoreResponse)
+    @protected.get("/customers/{customer_id}/score", response_model=ScoreResponse)
     def score_customer(customer_id: int, models: Models, conn: Conn) -> ScoreResponse:
         """Score a customer now with the live models, from their latest-snapshot features."""
         frame = scorable_customer(conn, customer_id)
@@ -359,7 +435,7 @@ def create_app(
             segment_of(conn, customer_id),
         )
 
-    @app.get("/customers/{customer_id}/prediction", response_model=ScoreResponse)
+    @protected.get("/customers/{customer_id}/prediction", response_model=ScoreResponse)
     def stored_prediction(customer_id: int, conn: Conn) -> ScoreResponse:
         """What batch scoring stored for a customer in the latest scoring run."""
         row = conn.execute(
@@ -392,13 +468,13 @@ def create_app(
             scored_at=row[8],
         )
 
-    @app.post("/score", response_model=ScoreResponse)
+    @protected.post("/score", response_model=ScoreResponse)
     def what_if(body: FeaturesRequest, models: Models) -> ScoreResponse:  # type: ignore[valid-type]
         """Score features you supply, for what-if questions. Nothing is stored."""
         frame = pd.DataFrame([body.model_dump()]).astype(float)  # type: ignore[attr-defined]
         return response("what-if", scoring.score_features(frame, models).iloc[0], models)
 
-    @app.get("/outreach/latest", response_model=OutreachPlan)
+    @protected.get("/outreach/latest", response_model=OutreachPlan)
     def latest_outreach_plan(
         conn: Conn,
         group: Annotated[Literal["contact", "holdout", "not_selected"] | None, Query()] = None,
@@ -462,7 +538,7 @@ def create_app(
             ],
         )
 
-    @app.get("/outreach/sensitivity")
+    @protected.get("/outreach/sensitivity")
     def outreach_sensitivity(
         conn: Conn,
         k: Annotated[int, Query(ge=1, le=5000)] = optimizer.DEFAULT_OUTREACH_SIZE,
@@ -479,6 +555,7 @@ def create_app(
         table = optimizer.sensitivity(scores, k, margins, contact_costs)
         return [{str(key): value for key, value in row.items()} for row in table.to_dict("records")]
 
+    app.include_router(protected)
     return app
 
 

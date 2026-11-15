@@ -8,7 +8,7 @@ x-app-base: &app-base
       condition: service_healthy
     mlflow:
       condition: service_healthy
-  environment:
+  environment: &app-env
     POSTGRES_USER: ${POSTGRES_USER}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     POSTGRES_DB: ${POSTGRES_DB}
@@ -136,10 +136,16 @@ services:
       - ./data:/data:ro
 
   # HTTP API (FastAPI). Start it with: docker compose up -d api   Docs: http://localhost:8000/docs
-  # Bound to localhost only: there is no authentication. It needs the models in the registry
-  # (train first) and, for stored scores and outreach plans, the score and plan stages.
+  # Bound to localhost only. With no API_KEY in .env it is open (fine on your own machine); with one
+  # every route but /health, /metrics and the docs needs it, and API_ADMIN_KEY alone may reload the
+  # models. It needs the models in the registry (train first) and, for stored scores and outreach
+  # plans, the score and plan stages.
   api:
     <<: *app-base
+    environment:
+      <<: *app-env
+      API_KEY: ${API_KEY:-}
+      API_ADMIN_KEY: ${API_ADMIN_KEY:-}
     build:
       context: .
       target: runtime
@@ -174,6 +180,8 @@ services:
         condition: service_healthy
     environment:
       API_URL: http://api:8000
+      API_KEY: ${API_KEY:-}
+      DASHBOARD_ALLOW_RELOAD: ${DASHBOARD_ALLOW_RELOAD:-1}
     ports:
       - "127.0.0.1:${DASHBOARD_PORT:-8501}:8501"
     healthcheck:
