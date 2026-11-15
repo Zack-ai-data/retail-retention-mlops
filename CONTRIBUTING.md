@@ -6,57 +6,38 @@ How changes are made here, so that anyone (including the person who wrote the co
 
 A change (new feature, bug fix, refactor, dependency bump) is done only when all of these hold:
 
-1. **Tests exist for the new or changed behaviour** (see "Where tests go"). A bug fix starts with a test that fails for the bug.
-2. **`docker compose run --rm quality` exits 0.** It runs, in order: `ruff check`, `ruff format --check`, `mypy --strict` (on `src/`), and `pytest --cov` with a 90% branch-coverage minimum.
-3. **The real-data regression tests pass.** They copy the loaded raw table into a scratch database and run your *current* SQL and model code on it, so they need the real data loaded (`docker compose run --rm app` once). Run them with `--require-warehouse`, which turns a skip into a failure, so a green run really did check the data. Run the full pipeline too if data processing or models were touched.
-4. **Intentional changes to results update the pinned values in the same change.** If a change deliberately alters the cleaning SQL, features, labels or models, update the expected numbers in `tests/test_warehouse_regression.py` and state why in the commit message. An unexplained change in those numbers is a regression until shown otherwise.
-5. **Docs match the code**: README (commands, structure) and the review/decision notes where relevant.
+1. **Tests exist for the new or changed behaviour.** A bug fix starts with a test that fails for the bug.
+2. **`docker compose run --rm quality` exits 0.** It runs `ruff check`, `ruff format --check`, `mypy --strict` (on `src/`) and `pytest --cov` with a 90% branch-coverage minimum.
+3. **The real-data regression tests pass.** They copy the loaded raw table into a scratch database and run the current SQL and model code on it, so the real data must be loaded (`docker compose run --rm app` once). Run them with `--require-warehouse`, which turns a skip into a failure, so a green run really did check the data.
+4. **Intentional changes to results update the pinned values in the same change,** in `tests/test_warehouse_regression.py`, with the reason in the commit message. An unexplained change in those numbers is a regression until shown otherwise.
+5. **Docs match the code:** the README (commands, structure) and the problem statement where behaviour or assumptions changed.
 
 ## What "no regression" means, precisely
 
-The gate being green proves:
+A green gate proves that the code is lint-clean, formatted and type-consistent; that every test passes with at least 90% of branches exercised; and that the current cleaning and feature SQL, run on a copy of the real raw data, still gives the same pinned counts and model results (skipped when the real data is not loaded, so a green run without `--require-warehouse` does not prove this part).
 
-- the code is lint-clean, consistently formatted and type-consistent;
-- every test passes, and at least 90% of branches are exercised;
-- the current cleaning and feature SQL, run on a copy of the real raw data, still produces the same row counts, line types, snapshot sizes and churn rates, and re-training on those tables still reproduces the recorded model results. (When the real data is not loaded these tests are skipped, so a green run without `--require-warehouse` does not prove this part.)
+It does **not** prove that behaviour no test covers is correct, that the business assumptions are right (for example the 90-day churn horizon), or that the pinned numbers are themselves correct: they detect change and are not an independent oracle.
 
-It does **not** prove:
-
-- that behaviour no test covers is correct (coverage measures lines executed, not behaviour verified);
-- that the business assumptions are right (for example the 90-day churn horizon);
-- that the pinned numbers are themselves correct. They detect change; they are not an independent oracle.
-
-So the accurate statement after a green gate is: "nothing the tests pin has changed". Say that, not "nothing broke".
+So the accurate statement after a green gate is "nothing the tests pin has changed", not "nothing broke".
 
 ## Coverage is a floor, not a goal
 
-The gate requires 90% branch coverage so that large untested areas cannot creep in. It is not a target to maximise. Do not add tests whose only purpose is to raise the number: contrived tests for trivial or defensive code, or tests that run code without asserting on the result, add cost and false confidence without catching bugs.
-
-- Coverage counts lines executed, not behaviour verified. A line can be covered by a test that checks nothing about it.
-- Put the effort where a mistake would matter (data correctness, the promotion decision, metrics, error handling) and write precise assertions there.
-- A few uncovered defensive branches are acceptable. A falling number is a prompt to ask whether new behaviour is tested, not to chase a percentage.
-- The stronger measure of test quality is whether tests fail when the code is wrong. Mutation testing does this systematically. It was run once on 18 pure functions (91% of 605 mutants killed, using the faster tests only); the training, orchestration, database and SQL code were not mutated, so there is no mutation evidence for them either way. It is not part of the gate. The slow model-training tests make the tool hang, so leave them out.
+The gate requires 90% branch coverage so that large untested areas cannot creep in. It is not a target to maximise. Do not add tests only to raise the number. Put the effort where a mistake would matter (data correctness, the promotion decision, metrics, error handling) and write precise assertions there. The stronger measure of test quality is whether tests fail when the code is wrong; mutation testing checks that, and was run once on a few pure functions. It is not part of the gate.
 
 ## Where tests go
 
-| What changed | Test file | Notes |
-|---|---|---|
-| Pure logic (metrics, feature building, naming) | `tests/test_metrics.py`, `tests/test_model.py`, `tests/test_extractor.py` | no database needed |
-| The promotion gate, bootstrap, calibration, baselines, hurdle model | `tests/test_gate.py`, `tests/test_evaluation.py`, `tests/test_calibration.py`, `tests/test_baselines.py`, `tests/test_hurdle.py`, `tests/test_tracking.py` | no database needed; `test_tracking.py` uses a throwaway SQLite MLflow store |
-| SQL (cleaning, features, labels) | `tests/test_processor.py` | runs the real SQL on a throwaway Postgres database with hand-built rows |
-| Database helpers | `tests/test_database.py` | |
-| A stage, the command line, exit codes | `tests/test_pipeline.py` | `-m e2e` runs the whole pipeline on a synthetic workbook |
-| The scoring arithmetic, the optimizer, the API | `tests/test_scoring.py`, `tests/test_optimizer.py`, `tests/test_api.py` | the API tests use FastAPI's test client, a throwaway database and stand-in models |
-| The dashboard | `tests/test_dashboard_client.py` (no Streamlit), `tests/test_dashboard_ui.py` (needs Streamlit) | the UI tests are skipped in the `quality` run; run them with `dashboard-tests` |
-| A new way for things to fail | `tests/test_error_handling.py` | add an exception type in `src/errors.py` and a test for its message |
-| Results on the real data | `tests/test_warehouse_regression.py` | `-m warehouse`; copies the loaded raw table into a scratch database and runs the current SQL and model code there; skipped when the real data is not loaded unless `--require-warehouse` is given |
+Tests live in `tests/`, named after the module they test. Keep them deterministic: seed randomness, no network, no reliance on test order.
 
-Keep tests deterministic: seed randomness, no network, no reliance on test order.
+- SQL (cleaning, features, labels) is tested by running the real SQL on a throwaway Postgres database with hand-built rows.
+- `-m e2e` runs the whole pipeline on a small synthetic workbook.
+- Results on the real data are pinned in `tests/test_warehouse_regression.py` (`-m warehouse`).
+- The dashboard's pages need Streamlit, so they are skipped in the `quality` run; run them with `docker compose run --rm dashboard-tests`.
+- A new way for things to fail gets an exception type in `src/errors.py` and a test for its message in `tests/test_error_handling.py`.
 
 ## Conventions
 
-- **Errors**: expected, fixable failures raise a `PipelineError` subclass with a message that says what happened and what to do. Catch broad exceptions only at the entry point (`main()`).
-- **Types**: everything in `src/` is annotated; `mypy --strict` must pass. Avoid `# type: ignore`; if one is needed, add a reason.
+- **Errors:** expected, fixable failures raise a `PipelineError` subclass with a message that says what happened and what to do. Catch broad exceptions only at the entry point (`main()`).
+- **Types:** everything in `src/` is annotated and `mypy --strict` must pass. Avoid `# type: ignore`; if one is needed, add a reason.
 - **Configuration** comes from environment variables read in `src/config.py`. Never hard-code or print secrets.
 - **SQL** lives in `sql/`; Python runs it. Transform scripts are idempotent (full rebuild).
 - **Raw data is never modified** after loading; cleaning happens in `staging`.
@@ -65,16 +46,16 @@ Keep tests deterministic: seed randomness, no network, no reliance on test order
 ## Git workflow
 
 - **`main` is always green.** It is protected: changes reach it only through a pull request whose CI run passed.
-- **One change per branch**, named by kind and subject: `feat/airflow-dags`, `fix/champion-rescoring`, `docs/problem-statement`, `chore/update-lock-files`. Keep branches short-lived and pull requests small enough to review in one sitting.
-- **Commit messages** say what changed and why, in the imperative, with a short prefix: `feat:`, `fix:`, `test:`, `docs:`, `chore:`, `refactor:`. Example: `fix: score the champion on the same data as the candidate`. The body explains the reason when it is not obvious.
-- **Open a pull request** with the template (`.github/pull_request_template.md`): what and why, how it was checked, and whether any pinned result changed and why. A change that moves a pinned value says so in the description, not only in the diff.
-- **Merge with squash**, so `main` has one commit per change, then delete the branch. Milestones are tagged (`step-4`).
-- **Never commit** `.env`, anything under `docs/review/` (private working material), or caches. `git status` before every commit.
+- **One change per branch**, named by kind and subject (`feat/airflow-dags`, `fix/champion-rescoring`, `docs/problem-statement`). Keep branches short-lived and pull requests small.
+- **Commit messages** say what changed and why, in the imperative, with a prefix: `feat:`, `fix:`, `test:`, `docs:`, `chore:`, `refactor:`.
+- **Open a pull request** with the template (`.github/pull_request_template.md`): what and why, how it was checked, and whether any pinned result changed and why.
+- **Merge with squash**, then delete the branch.
+- **Never commit** `.env`, anything under `docs/review/` or `notes/` (private working material), or caches. Run `git status` before every commit.
 - **History is not rewritten** on `main`. If a mistake gets in, fix it forward with a new change.
 
 ## Releasing
 
-Releases publish the API and dashboard images to the GitHub Container Registry (`.github/workflows/deploy.yml`). They are published by tagging a commit that is already on `main` and green:
+Releases publish the API and dashboard images to the GitHub Container Registry (`.github/workflows/deploy.yml`). Tag a commit that is already on `main` and green:
 
 ```
 git switch main && git pull
@@ -82,9 +63,7 @@ git tag -a v0.1.0 -m "What this release contains"
 git push origin v0.1.0
 ```
 
-The workflow builds both images, starts each one to check it runs (and does not run as root), and then publishes them as `ghcr.io/<owner>/<repo>-api` and `-dashboard`, tagged `0.1.0`, `0.1`, `sha-<commit>` and `latest`. The commit is built into the API image, so training runs from it record which code made them. To try the build without publishing, run the workflow by hand from the Actions tab and leave "Publish the images" unticked. Do not delete or move a published tag: publish a new version instead.
-
-After the first publish, open the package on GitHub (your profile > Packages) and check its visibility. Running the published images somewhere is a later step.
+The workflow builds both images, starts each to check it runs and does not run as root, and then publishes them as `ghcr.io/<owner>/<repo>-api` and `-dashboard`. To try the build without publishing, run the workflow by hand from the Actions tab and leave "Publish the images" unticked. Do not delete or move a published tag: publish a new version instead.
 
 ## Adding a service
 
@@ -96,37 +75,39 @@ Put its container setup in `services/<name>/` (Dockerfile and config), add it to
 docker compose up -d postgres mlflow          # start the services
 docker compose build                          # rebuild the images (after changing code or a lock file)
 docker compose run --rm app                   # run the pipeline (load, transform, train)
-docker compose run --rm quality               # the gate, with the fast training tests (about 14 minutes)
-docker compose run --rm -e FULL_TRAINING_TESTS=1 quality   # the same, with the real hyperparameter grids (about 25 minutes)
+docker compose run --rm quality               # the gate, with the fast training tests
+docker compose run --rm -e FULL_TRAINING_TESTS=1 quality   # the same, with the real hyperparameter grids
 docker compose run --rm quality python -m pytest -m "not e2e and not warehouse"   # quick feedback
 docker compose run --rm quality python -m pytest -m warehouse --require-warehouse  # real-data regression
 docker compose up -d api dashboard            # the API (:8000) and the dashboard (:8501)
 docker compose run --rm dashboard-tests       # the dashboard's own tests (they need Streamlit)
 docker compose --profile airflow up -d airflow-apiserver airflow-scheduler airflow-dag-processor airflow-worker airflow-triggerer   # Airflow, http://localhost:8080
-docker compose --profile airflow exec airflow-scheduler airflow dags trigger retail_etl   # run the ETL DAG (about 2.5 minutes)
-docker compose --profile airflow exec airflow-scheduler airflow dags trigger retail_retrain_score   # retrain, report, score, plan (about 3 minutes; it also starts after retail_etl succeeds)
+docker compose --profile airflow exec airflow-scheduler airflow dags trigger retail_etl
+docker compose --profile airflow exec airflow-scheduler airflow dags trigger retail_retrain_score
 docker compose --profile airflow stop         # stop Airflow (its data is kept)
-docker compose --profile monitoring up -d     # Prometheus (:9090) and Grafana (:3000); start the API too so it is scraped
-docker compose stop grafana prometheus        # stop only monitoring (`--profile monitoring stop` also stops Postgres and MLflow)
-docker compose restart grafana                # after editing a dashboard or provisioning file (Grafana does not notice edits while running)
-docker compose --profile monitoring up grafana-db-init   # re-run the read-only login's grants (after Airflow, MLflow or the pipeline first create their tables)
+docker compose --profile monitoring up -d     # Prometheus (:9090) and Grafana (:3000); start the API too
+docker compose stop grafana prometheus        # stop only monitoring
+docker compose restart grafana                # after editing a dashboard or provisioning file
+docker compose --profile monitoring up grafana-db-init   # re-run the read-only login's grants
 docker compose run --rm app python -m src.main --stage monitor   # refresh the tables the dashboards read
-docker compose run --rm app python -m src.demo_traffic --api-url http://api:8000 --minutes 5   # synthetic demo traffic (not real usage; counted as traffic="demo")
+docker compose run --rm app python -m src.demo_traffic --api-url http://api:8000 --minutes 5   # synthetic demo traffic
 ```
 
 The `app` image is the runtime image: runtime libraries only, no tests or dev tools, and it runs as a non-root user. The tests and dev tools live in the `quality` image. The `app` image holds a copy of the code from when it was built, so rebuild it (`docker compose build app`) after changing code, or the pipeline runs the old version.
 
 ### Dependencies and reproducibility
 
-- `pyproject.toml` lists only direct dependencies. The exact versions, with hashes, are in `requirements.lock` (runtime) and `requirements-dev.lock` (runtime plus pytest, ruff and mypy). The images and CI install from these with `--require-hashes`, and a test checks that the installed libraries match the lock file.
+- `pyproject.toml` lists only direct dependencies. The exact versions, with hashes, are in `requirements.lock` (runtime) and `requirements-dev.lock` (runtime plus pytest, ruff and mypy). The images and CI install from these with `--require-hashes`, and a test checks that the installed libraries match.
 - After changing `pyproject.toml`, regenerate both lock files with the command at the top of each file, then rebuild the images. Add `-c` with the output of `pip freeze` to keep today's versions instead of taking the newest allowed ones; then run the gate, because a library upgrade can change model results.
-- Dependabot (`.github/dependabot.yml`) proposes updates to GitHub Actions, Docker base images and the images in `docker-compose.yml`, never to the Python libraries (those are regenerated with the commands above) and never to a major version of Postgres, Redis, Prometheus, Grafana or Airflow, never to a minor version of Redis (the project stays on 7.2, the last release under its original licence), or to the Python of the images (the locks are built for 3.12). Review its pull requests like any other: CI must pass first. To see what it found or to check for updates at once, use Insights > Dependency graph > Dependabot. When you add an image to a Dockerfile or to `docker-compose.yml`, a test fails until the image has a decision in the Dependabot file.
-- Training runs are tagged with where they came from: `git_sha`, the checksum of the Excel file that was loaded (`raw_file_sha256`, recorded at load time in `raw.load_log`), a checksum of the transform SQL, the lock file checksum and library versions. The image has no `.git` folder, so pass the commit when building: `GIT_SHA=$(git rev-parse HEAD) docker compose build`. Without it the tag says `unknown`.
+- Dependabot (`.github/dependabot.yml`) proposes updates to GitHub Actions, Docker base images and the images in `docker-compose.yml`. It never touches the Python libraries (regenerate those as above), a major version of the stateful services, or the Python of the images. Review its pull requests like any other: CI must pass first. When you add an image, a test fails until the image has a decision in the Dependabot file.
+- Training runs are tagged with where they came from: the git commit, a checksum of the Excel file, of the transform SQL and of the lock file, and the library versions. The image has no `.git` folder, so pass the commit when building: `GIT_SHA=$(git rev-parse HEAD) docker compose build`. Without it the tag says `unknown`.
 
-Continuous integration (`.github/workflows/ci.yml`) has six jobs. `quality` (lint, format, strict types and the fast tests), `dashboard` (the Streamlit tests) and `airflow-dags` run on every push and pull request and are the checks a pull request must pass (they are the required checks in the repository ruleset). `airflow-dags` builds the Airflow image (layers cached) and loads every DAG in it with `services/airflow/check_dags.py`. `full-training` (the same tests with the real hyperparameter grids and 1,000 bootstrap resamples), `regression` (loads the real dataset and checks the pinned results reproduce) and `fresh-machine` (starts the database, MLflow and the API on empty volumes as a new machine would, checks the API answers a clean 503 that says what to run, runs the whole pipeline, then checks the API serves a real customer without anyone reloading it; about 15 minutes, throwaway credentials, no secret) run after a merge to `main` and by hand; they cannot be required checks because they do not run on pull requests, so a red run on `main` is fixed with a new pull request. All six jobs also run **every Monday at 02:17 UTC (10:17 in Malaysia)**. That run is a reproducibility check of what is not pinned (Docker images, the runner image, the actions), not retraining; it runs on GitHub's machines, needs no secret, is switched off by GitHub after 60 days without repository activity (re-enable it under Actions), and cannot be cancelled by a push to `main`. To try the jobs without waiting for Monday, use Actions > CI > Run workflow.
+### Continuous integration
+
+`.github/workflows/ci.yml` has six jobs. `quality`, `dashboard` and `airflow-dags` run on every push and pull request and are the required checks. `full-training`, `regression` and `fresh-machine` run after a merge to `main` and by hand; they cannot be required checks, so a red run on `main` is fixed with a new pull request. All six also run every Monday on a schedule, as a reproducibility check of what is not pinned (Docker images, the runner image, the actions). To try the jobs without waiting, use Actions > CI > Run workflow.
 
 ### Fast and full training tests
 
-Tests that train models check plumbing (is the decision logged, is the model registered), not the numbers, so by default they train with one hyperparameter combination per algorithm and 100 bootstrap resamples (the `quick_training` fixture in `tests/conftest.py`). That more than halves the run time. `FULL_TRAINING_TESTS=1` switches to the real grids and 1,000 resamples. Tests marked `warehouse` always use the real settings, because they pin the real results. `tests/test_training_modes.py` checks which mode is active, so neither can silently turn into the other. Do not lower an assertion to make a quick-mode test pass: if a test only passes with the real settings, it belongs in the full run.
+Tests that train models check plumbing (is the decision logged, is the model registered), not the numbers, so by default they train with one hyperparameter combination per algorithm and 100 bootstrap resamples (the `quick_training` fixture in `tests/conftest.py`). `FULL_TRAINING_TESTS=1` switches to the real grids and 1,000 resamples. Tests marked `warehouse` always use the real settings, because they pin the real results. Do not lower an assertion to make a quick-mode test pass: if a test only passes with the real settings, it belongs in the full run.
 
-Not set up yet: pre-commit hooks and vulnerability scanning of the dependencies.
+Not set up yet: pre-commit hooks.
