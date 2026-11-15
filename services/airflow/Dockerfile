@@ -5,7 +5,8 @@
 #   * /opt/pipeline-venv, built from the project's hashed lock file, which holds the pipeline.
 # Tasks run `/opt/pipeline-venv/bin/python -m src.main --stage ...`, so the pipeline always runs on
 # exactly the library versions the tests ran with, and neither environment can break the other.
-# Airflow 3.3.2 pins pandas 3.0.5 and numpy 2.5.3; the project is tested on 3.0.6 and 2.5.4.
+# Airflow's versions of shared libraries (pandas, numpy) can differ from the project's locked ones;
+# that is why the two environments are kept apart.
 #
 # Build from the project folder (the compose file does): the context must contain src/ and sql/.
 
