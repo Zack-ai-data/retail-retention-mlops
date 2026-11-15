@@ -181,6 +181,22 @@ def test_the_sidebar_shows_the_models_and_the_latest_scoring_run(monkeypatch):
     assert any("2011-12-10" in c.value for c in app.sidebar.caption)
 
 
+def test_the_reload_button_is_offered_by_default(monkeypatch):
+    monkeypatch.delenv("DASHBOARD_ALLOW_RELOAD", raising=False)
+
+    app, _ = start(monkeypatch)
+
+    assert "reload" in [b.key for b in app.sidebar.button]
+
+
+def test_a_public_deployment_hides_the_reload_button(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_ALLOW_RELOAD", "0")
+
+    app, _ = start(monkeypatch)
+
+    assert "reload" not in [b.key for b in app.sidebar.button]
+
+
 def test_the_plan_page_shows_the_numbers_a_planner_needs(monkeypatch):
     app, _ = start(monkeypatch)
 

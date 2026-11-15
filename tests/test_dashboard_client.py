@@ -293,3 +293,43 @@ def test_it_recognises_when_the_assumptions_make_no_difference_to_the_list():
 def test_money_and_percent_are_formatted_for_reading():
     assert dc.money(83271.4) == "£83,271"
     assert dc.percent(0.6299) == "63%"
+
+
+# ------------------------------------------------------------------------- the API key
+
+
+def test_the_key_is_sent_with_every_request_when_there_is_one():
+    session = FakeSession(reply(body={"status": "ok"}), reply(body={"ok": 1}))
+    client = dc.ApiClient("http://api:8000", session=session, api_key="secret")
+
+    client.health()
+    client.reload_models()
+
+    assert [kwargs["headers"] for _, _, kwargs in session.calls] == [{"X-API-Key": "secret"}] * 2
+
+
+def test_no_header_is_sent_without_a_key(monkeypatch):
+    monkeypatch.delenv("API_KEY", raising=False)
+    client, session = client_with(reply(body={"status": "ok"}))
+
+    client.health()
+
+    assert "headers" not in session.calls[0][2]
+
+
+def test_the_key_comes_from_the_environment_when_not_given(monkeypatch):
+    monkeypatch.setenv("API_KEY", "from-env")
+    session = FakeSession(reply(body={"status": "ok"}))
+
+    dc.ApiClient("http://api:8000", session=session).health()
+
+    assert session.calls[0][2]["headers"] == {"X-API-Key": "from-env"}
+
+
+def test_an_explicit_key_beats_the_environment(monkeypatch):
+    monkeypatch.setenv("API_KEY", "from-env")
+    session = FakeSession(reply(body={"status": "ok"}))
+
+    dc.ApiClient("http://api:8000", session=session, api_key="explicit").health()
+
+    assert session.calls[0][2]["headers"] == {"X-API-Key": "explicit"}

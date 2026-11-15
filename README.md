@@ -164,7 +164,8 @@ Serving and decisions (step 4):
  - **Outreach plan** (`src/optimizer.py`): rank by margin at risk, take the top 500 whose margin at risk exceeds the £5 contact cost, and hold out a random 10% (fixed seed) who are deliberately not contacted, so impact could be measured later. The 500, the £5 and the 30% are stated assumptions in `docs/problem_statement.md`.
  - **API** (`src/api.py`, FastAPI, docs at `/docs`): health, live and stored scores, features, what-if scoring, the outreach plan and its sensitivity, and a model reload. Inputs are validated and errors say what to do. If the models or tables are not there yet (a new machine, or MLflow not ready at start-up), it answers a clear 503 that says what to run, and it fetches the models by itself once they exist.
  - **Dashboard** (`services/dashboard/`, Streamlit): who to contact, customer lookup, what-if and the assumptions. It talks only to the API and runs in its own small image.
- - Not yet: authentication (everything is bound to localhost).
+ - **Access control:** with no `API_KEY` in `.env` the API is open, which is fine on your own machine. With one, every route except health, metrics and the docs needs it in the `X-API-Key` header, and only `API_ADMIN_KEY` may reload the models.
+ - Not yet: HTTPS and rate limiting (everything is bound to localhost).
 
 Orchestration (step 5):
  - **Airflow with the Celery executor and Redis,** started with `docker compose --profile airflow up -d airflow-apiserver airflow-scheduler airflow-dag-processor airflow-worker airflow-triggerer`. The interface is at `http://localhost:8080` (localhost only); log in with `AIRFLOW_ADMIN_USER` and `AIRFLOW_ADMIN_PASSWORD` from `.env`. Stop it with `docker compose --profile airflow stop`.

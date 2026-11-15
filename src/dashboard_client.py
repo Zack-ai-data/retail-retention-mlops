@@ -16,6 +16,7 @@ import pandas as pd
 import requests
 
 DEFAULT_API_URL = "http://localhost:8000"
+API_KEY_HEADER = "X-API-Key"  # the same name src/api.py checks; this module cannot import it
 
 # What an outreach list for the people doing the contacting contains. The holdout group is never
 # in it: those customers are deliberately left alone so impact can be measured later.
@@ -60,12 +61,18 @@ class ApiClient:
         base_url: str | None = None,
         session: requests.Session | None = None,
         timeout: float = 20.0,
+        api_key: str | None = None,
     ) -> None:
         self.base_url = (base_url or os.getenv("API_URL") or DEFAULT_API_URL).rstrip("/")
         self.session = session or requests.Session()
         self.timeout = timeout
+        # sent with every request when the API asks for a key; the server holds it, a visitor to
+        # the dashboard never sees it
+        self.api_key = os.getenv("API_KEY", "") if api_key is None else api_key
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
+        if self.api_key:
+            kwargs["headers"] = {**kwargs.get("headers", {}), API_KEY_HEADER: self.api_key}
         try:
             return self.session.request(
                 method, f"{self.base_url}{path}", timeout=self.timeout, **kwargs

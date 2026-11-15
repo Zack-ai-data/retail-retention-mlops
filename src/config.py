@@ -29,6 +29,12 @@ CHURN_MODEL_NAME = "retail-churn-classifier"
 VALUE_MODEL_NAME = "retail-value-regressor"
 SEGMENT_MODEL_NAME = "retail-rfm-segments"
 
+# API access control (src/api.py). With no API_KEY the API is open, which is the local default.
+# With one, every route except the open ones needs it in the X-API-Key header. API_ADMIN_KEY is the
+# only key that may reload the models; without it reloading is switched off.
+API_KEY = os.getenv("API_KEY", "")
+API_ADMIN_KEY = os.getenv("API_ADMIN_KEY", "")
+
 # Models are stored with cloudpickle: only load models from this project's own registry.
 SERIALIZATION = "cloudpickle"
 
