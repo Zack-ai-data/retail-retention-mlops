@@ -9,7 +9,7 @@
 #
 # Build from the project folder (the compose file does): the context must contain src/ and sql/.
 
-FROM apache/airflow:3.3.2-python3.12
+FROM apache/airflow:3.4.0-python3.12
 
 USER root
 RUN mkdir -p /opt/pipeline /opt/pipeline-venv \
